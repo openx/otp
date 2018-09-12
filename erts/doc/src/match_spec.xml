@@ -134,6 +134,7 @@
       <item>ActionFunction ::= <c><![CDATA[set_seq_token]]></c> |
         <c><![CDATA[get_seq_token]]></c> | <c><![CDATA[message]]></c> |
         <c><![CDATA[return_trace]]></c> | <c><![CDATA[exception_trace]]></c> |
+	<c><![CDATA[process_backtrace]]></c> |
         <c><![CDATA[process_dump]]></c> | <c><![CDATA[enable_trace]]></c> |
         <c><![CDATA[disable_trace]]></c> | <c><![CDATA[trace]]></c> |
         <c><![CDATA[display]]></c> | <c><![CDATA[caller]]></c> |
@@ -351,6 +352,11 @@
             an <c><![CDATA[exception_from]]></c> trace message is generated,
             regardless of the exception is caught or not.</p>
         </item>
+        <tag><c>process_backtrace</c></tag>
+        <item>
+	  <p>Returns some textual information about the current process's
+	  stack as a binary. Takes no arguments and is only allowed in the
+	  <c><![CDATA[MatchBody]]></c> part when tracing.</p>
         <tag><c>process_dump</c></tag>
         <item>
           <p>Returns some textual information about
