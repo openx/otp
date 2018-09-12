@@ -551,7 +551,7 @@ do {									\
 
 static void exec_misc_ops(ErtsRunQueue *);
 static void print_function_from_pc(fmtfn_t to, void *to_arg, BeamInstr* x);
-static int stack_element_dump(fmtfn_t to, void *to_arg, Eterm* sp, int yreg);
+static int stack_element_dump(fmtfn_t to, void *to_arg, Eterm* sp, int yreg, int abbreviated);
 
 static void aux_work_timeout(void *unused);
 static void aux_work_timeout_early_init(int no_schedulers);
@@ -12772,7 +12772,7 @@ erts_try_lock_sig_free_proc(Eterm pid, ErtsProcLocks locks,
  */
 
 void
-erts_stack_dump(fmtfn_t to, void *to_arg, Process *p)
+erts_stack_dump2(fmtfn_t to, void *to_arg, Process *p, int abbreviated)
 {
     Eterm* sp;
     int yreg = -1;
@@ -12782,8 +12782,20 @@ erts_stack_dump(fmtfn_t to, void *to_arg, Process *p)
     }
     erts_program_counter_info(to, to_arg, p);
     for (sp = p->stop; sp < STACK_START(p); sp++) {
-        yreg = stack_element_dump(to, to_arg, sp, yreg);
+        yreg = stack_element_dump(to, to_arg, sp, yreg, abbreviated);
     }
+}
+
+void
+erts_stack_dump(fmtfn_t to, void *to_arg, Process *p)
+{
+    erts_stack_dump2(to, to_arg, p, 0);
+}
+
+void
+erts_stack_dump_abbreviated(fmtfn_t to, void *to_arg, Process *p)
+{
+    erts_stack_dump2(to, to_arg, p, 1);
 }
 
 void
@@ -12840,16 +12852,18 @@ print_function_from_pc(fmtfn_t to, void *to_arg, BeamInstr* x)
 }
 
 static int
-stack_element_dump(fmtfn_t to, void *to_arg, Eterm* sp, int yreg)
+stack_element_dump(fmtfn_t to, void *to_arg, Eterm* sp, int yreg, int abbreviated)
 {
     Eterm x = *sp;
 
     if (yreg < 0 || is_CP(x)) {
         erts_print(to, to_arg, "\n%p ", sp);
     } else {
-        char sbuf[16];
-        erts_snprintf(sbuf, sizeof(sbuf), "y(%d)", yreg);
-        erts_print(to, to_arg, "%-8s ", sbuf);
+	if (! abbreviated) {
+	    char sbuf[16];
+	    erts_snprintf(sbuf, sizeof(sbuf), "y(%d)", yreg);
+	    erts_print(to, to_arg, "%-8s ", sbuf);
+	}
         yreg++;
     }
 
@@ -12858,12 +12872,14 @@ stack_element_dump(fmtfn_t to, void *to_arg, Eterm* sp, int yreg)
         print_function_from_pc(to, to_arg, cp_val(x));
         erts_print(to, to_arg, ")\n");
         yreg = 0;
-    } else if is_catch(x) {
-        erts_print(to, to_arg, "Catch %p (", catch_pc(x));
-        print_function_from_pc(to, to_arg, catch_pc(x));
-        erts_print(to, to_arg, ")\n");
-    } else {
-	erts_print(to, to_arg, "%T\n", x);
+    } else if (! abbreviated) {
+	if (is_catch(x)) {
+	    erts_print(to, to_arg, "Catch %p (", catch_pc(x));
+	    print_function_from_pc(to, to_arg, catch_pc(x));
+	    erts_print(to, to_arg, ")\n");
+	} else {
+	    erts_print(to, to_arg, "%T\n", x);
+	}
     }
     return yreg;
 }
