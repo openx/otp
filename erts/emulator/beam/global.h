@@ -1265,6 +1265,9 @@ void erts_debug_save_accessed_literal_area(ErtsLiteralArea *lap);
 /* external.c */
 void erts_init_external(void);
 
+/* json.c */
+void erts_init_json(void);
+
 /* erl_map.c */
 void erts_init_map(void);
 
