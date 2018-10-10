@@ -685,3 +685,8 @@ bif erts_internal:maps_to_list/2
 #
 
 bif erlang:iolist_to_iovec/1
+
+bif erlang:term_to_json/1
+bif erlang:term_to_json/2
+bif erlang:json_to_term/1
+bif erlang:json_to_term/2
