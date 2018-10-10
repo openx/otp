@@ -1244,6 +1244,9 @@ Sint erts_binary_set_loop_limit(Sint limit);
 /* external.c */
 void erts_init_external(void);
 
+/* json.c */
+void erts_init_json(void);
+
 /* erl_map.c */
 void erts_init_map(void);
 

@@ -351,6 +351,8 @@ atom invalid
 atom is_constant
 atom is_seq_trace
 atom io
+atom json
+atom json_to_term_trap
 atom keypos
 atom kill
 atom killed
@@ -480,6 +482,7 @@ atom notempty_atstart
 atom notify
 atom notsup
 atom nouse_stdio
+atom null
 atom objects
 atom off_heap
 atom offset
@@ -650,6 +653,7 @@ atom system_architecture
 atom SYSTEM='SYSTEM'
 atom table
 atom term_to_binary_trap
+atom term_to_json_trap
 atom this
 atom thread_pool_size
 atom threads
