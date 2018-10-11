@@ -66,6 +66,8 @@
                       Secs :: non_neg_integer(),
                       MicroSecs :: non_neg_integer()}.
 
+-type json_binary() :: binary().
+
 -type time_unit() ::
 	pos_integer()
       | 'second'
@@ -130,6 +132,7 @@
 -export([integer_to_binary/1, integer_to_list/1]).
 -export([iolist_size/1, iolist_to_binary/1, iolist_to_iovec/1]).
 -export([is_alive/0, is_builtin/3, is_process_alive/1, length/1, link/1]).
+-export([term_to_json/1]).
 -export([list_to_atom/1, list_to_binary/1]).
 -export([list_to_bitstring/1, list_to_existing_atom/1, list_to_float/1]).
 -export([list_to_integer/1, list_to_integer/2]).
@@ -2458,6 +2461,11 @@ term_to_binary(_Term) ->
                   {compressed, Level :: 0..9} |
                   {minor_version, Version :: 0..2} ].
 term_to_binary(_Term, _Options) ->
+    erlang:nif_error(undefined).
+
+-spec term_to_json(Term) -> json_binary() when
+    Term :: term().
+term_to_json(_Term) ->
     erlang:nif_error(undefined).
 
 %% Shadowed by erl_bif_types: erlang:tl/1
