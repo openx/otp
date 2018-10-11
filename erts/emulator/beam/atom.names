@@ -650,6 +650,7 @@ atom system_architecture
 atom SYSTEM='SYSTEM'
 atom table
 atom term_to_binary_trap
+atom term_to_json_trap
 atom this
 atom thread_pool_size
 atom threads
