@@ -18,7 +18,14 @@
  * %CopyrightEnd%
  */
 
-/*  Conversion to JSON format.
+/* Conversion to JSON format.
+ *
+ * This code is derived from the external term format conversion code in
+ * external.c, and reuses some of the data structures defined by that code,
+ * notably TTBEncode.  ETF construction has three phases (determining the
+ * binary size, encoding, and compressing) but JSON construction does not have
+ * compression, and grows the output binary as necessary instead of making a
+ * separate pass over the input first to calculate the size.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -43,34 +50,18 @@
 #include "erl_zlib.h"
 #include "erl_map.h"
 
-#define in_area(ptr,start,nbytes) ((UWord)((char*)(ptr) - (char*)(start)) < (nbytes))
-
-#define MAX_STRING_LEN 0xffff
-
-/* Does Sint fit in Sint32?
- */
-#define IS_SSMALL32(x) (((Uint) (((x) >> (32-1)) + 1)) < 2)
-
 static Export term_to_json_trap_export;
 
-static byte* enc_json(ErtsAtomCacheMap *, Eterm, byte*, Uint32, struct erl_off_heap_header** off_heap);
+static byte* enc_json(Eterm, byte*, Uint32, struct erl_off_heap_header** off_heap);
 struct TTBEncodeContext_;
-static int enc_json_int(struct TTBEncodeContext_*,ErtsAtomCacheMap *acmp, Eterm obj, byte* ep, Uint32 dflags,
+static int enc_json_int(struct TTBEncodeContext_*, Eterm obj, byte* ep, Uint32 dflags,
 			struct erl_off_heap_header** off_heap, Sint *reds, byte **res);
-static Uint is_external_string(Eterm obj, int* p_is_string);
-static byte* enc_atom(ErtsAtomCacheMap *, Eterm, byte*, Uint32);
-struct B2TContext_t;
-static byte* dec_json(ErtsDistExternal*, ErtsHeapFactory*, byte*, Eterm*, struct B2TContext_t*);
-static Sint decoded_size(byte *ep, byte* endp, int internal_tags, struct B2TContext_t*);
+struct J2TContext_t;
+static byte* dec_json(ErtsDistExternal*, ErtsHeapFactory*, byte*, Eterm*, struct J2TContext_t*);
+static Sint decoded_size(byte *ep, byte* endp, int internal_tags, struct J2TContext_t*);
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
 
-static Eterm erts_term_to_json_int(Process* p, Eterm Term, int level, Uint flags,
-				   Binary *context_b);
-
-static Uint encode_size_struct2(ErtsAtomCacheMap *, Eterm, unsigned);
-struct TTBSizeContext_;
-static int encode_size_struct_int(struct TTBSizeContext_*, ErtsAtomCacheMap *acmp, Eterm obj,
-				  unsigned dflags, Sint *reds, Uint *res);
+static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b);
 
 static Export json_to_term_trap_export;
 static BIF_RETTYPE json_to_term_trap_1(BIF_ALIST_1);
@@ -88,220 +79,6 @@ void erts_init_json(void) {
     return;
 }
 
-#if 0
-int erts_encode_dist_ext_size(Eterm term, Uint32 flags, ErtsAtomCacheMap *acmp,
-			      Uint* szp)
-{
-    Uint sz;
-    if (encode_size_struct_int(NULL, acmp, term, flags, NULL, &sz)) {
-	return -1;
-    } else {
-#ifndef ERTS_DEBUG_USE_DIST_SEP
-	if (!(flags & DFLAG_DIST_HDR_ATOM_CACHE))
-#endif
-	    sz++ /* VERSION_MAGIC */;
-
-	*szp += sz;
-	return 0;
-    }
-}
-
-int erts_encode_dist_ext_size_int(Eterm term, struct erts_dsig_send_context* ctx, Uint* szp)
-{
-    Uint sz;
-    if (encode_size_struct_int(&ctx->u.sc, ctx->acmp, term, ctx->flags, &ctx->reds, &sz)) {
-	return -1;
-    } else {
-#ifndef ERTS_DEBUG_USE_DIST_SEP
-	if (!(ctx->flags & DFLAG_DIST_HDR_ATOM_CACHE))
-#endif
-	    sz++ /* VERSION_MAGIC */;
-
-	*szp += sz;
-	return 0;
-    }
-}
-
-Uint erts_encode_ext_size(Eterm term)
-{
-    return encode_size_struct2(NULL, term, TERM_TO_JSON_DFLAGS)
-	+ 1 /* VERSION_MAGIC */;
-}
-
-Uint erts_encode_ext_size_2(Eterm term, unsigned dflags)
-{
-    return encode_size_struct2(NULL, term, dflags)
-        + 1 /* VERSION_MAGIC */;
-}
-
-Uint erts_encode_ext_size_ets(Eterm term)
-{
-    return encode_size_struct2(NULL, term, TERM_TO_JSON_DFLAGS|DFLAG_INTERNAL_TAGS);
-}
-#endif
-
-
-int erts_encode_dist_json(Eterm term, byte **ext, Uint32 flags, ErtsAtomCacheMap *acmp,
-			  TTBEncodeContext* ctx, Sint* reds)
-{
-    if (!ctx || !ctx->wstack.wstart) {
-    #ifndef ERTS_DEBUG_USE_DIST_SEP
-	if (!(flags & DFLAG_DIST_HDR_ATOM_CACHE))
-    #endif
-	    *(*ext)++ = VERSION_MAGIC;
-    }
-    return enc_json_int(ctx, acmp, term, *ext, flags, NULL, reds, ext);
-}
-
-void erts_encode_json(Eterm term, byte **ext)
-{
-    byte *ep = *ext;
-    *ep++ = VERSION_MAGIC;
-    ep = enc_json(NULL, term, ep, TERM_TO_JSON_DFLAGS, NULL);
-    if (!ep)
-	erts_exit(ERTS_ABORT_EXIT,
-		 "%s:%d:erts_encode_ext(): Internal data structure error\n",
-		 __FILE__, __LINE__);
-    *ext = ep;
-}
-
-byte* erts_encode_json_ets(Eterm term, byte *ep, struct erl_off_heap_header** off_heap)
-{
-    return enc_json(NULL, term, ep, TERM_TO_JSON_DFLAGS|DFLAG_INTERNAL_TAGS,
-		    off_heap);
-}
-
-ErtsDistExternal *
-erts_make_dist_ext_copy(ErtsDistExternal *edep, Uint xsize)
-{
-    size_t align_sz;
-    size_t dist_ext_sz;
-    size_t ext_sz;
-    byte *ep;
-    ErtsDistExternal *new_edep;
-
-    dist_ext_sz = ERTS_DIST_EXT_SIZE(edep);
-    ASSERT(edep->ext_endp && edep->extp);
-    ASSERT(edep->ext_endp >= edep->extp);
-    ext_sz = edep->ext_endp - edep->extp;
-
-    align_sz = ERTS_EXTRA_DATA_ALIGN_SZ(dist_ext_sz + ext_sz);
-
-    new_edep = erts_alloc(ERTS_ALC_T_EXT_TERM_DATA,
-			  dist_ext_sz + ext_sz + align_sz + xsize);
-
-    ep = (byte *) new_edep;
-    sys_memcpy((void *) ep, (void *) edep, dist_ext_sz);
-    ep += dist_ext_sz;
-    if (new_edep->dep)
-	erts_smp_refc_inc(&new_edep->dep->refc, 1);
-    new_edep->extp = ep;
-    new_edep->ext_endp = ep + ext_sz;
-    new_edep->heap_size = -1;
-    sys_memcpy((void *) ep, (void *) edep->extp, ext_sz);
-    return new_edep;
-}
-
-int
-erts_prepare_dist_ext(ErtsDistExternal *edep,
-		      byte *ext,
-		      Uint size,
-		      DistEntry *dep,
-		      ErtsAtomCache *cache)
-{
-}
-
-static void
-bad_dist_ext(ErtsDistExternal *edep)
-{
-}
-
-Sint
-erts_decode_dist_ext_size(ErtsDistExternal *edep)
-{
-    Sint res;
-    byte *ep;
-    if (edep->extp >= edep->ext_endp)
-	goto fail;
-#ifndef ERTS_DEBUG_USE_DIST_SEP
-    if (edep->flags & ERTS_DIST_EXT_DFLAG_HDR) {
-	if (*edep->extp == VERSION_MAGIC)
-	    goto fail;
-	ep = edep->extp;
-    }
-    else
-#endif
-    {
-	if (*edep->extp != VERSION_MAGIC)
-	    goto fail;
-	ep = edep->extp+1;
-    }
-    res = decoded_size(ep, edep->ext_endp, 0, NULL);
-    if (res >= 0)
-	return res;
- fail:
-    bad_dist_ext(edep);
-    return -1;
-}
-
-Sint erts_decode_ext_size(byte *ext, Uint size)
-{
-    if (size == 0 || *ext != VERSION_MAGIC)
-	return -1;
-    return decoded_size(ext+1, ext+size, 0, NULL);
-}
-
-Sint erts_decode_ext_size_ets(byte *ext, Uint size)
-{
-    Sint sz = decoded_size(ext, ext+size, 1, NULL);
-    ASSERT(sz >= 0);
-    return sz;
-}
-
-
-/*
-** hpp is set to either a &p->htop or
-** a pointer to a memory pointer (form message buffers)
-** on return hpp is updated to point after allocated data
-*/
-Eterm
-erts_decode_dist_ext(ErtsHeapFactory* factory,
-		     ErtsDistExternal *edep)
-{
-}
-
-Eterm erts_decode_json(ErtsHeapFactory* factory, byte **ext, Uint32 flags)
-{
-    ErtsDistExternal ede, *edep;
-    Eterm obj;
-    byte *ep = *ext;
-    if (*ep++ != VERSION_MAGIC) {
-        erts_factory_undo(factory);
-	return THE_NON_VALUE;
-    }
-    if (flags) {
-        ASSERT(flags == ERTS_DIST_EXT_BTT_SAFE);
-        ede.flags = flags; /* a dummy struct just for the flags */
-        edep = &ede;
-    } else {
-        edep = NULL;
-    }
-    ep = dec_json(edep, factory, ep, &obj, NULL);
-    if (!ep) {
-	return THE_NON_VALUE;
-    }
-    *ext = ep;
-    return obj;
-}
-
-Eterm erts_decode_json_ets(ErtsHeapFactory* factory, byte *ext)
-{
-    Eterm obj;
-    ext = dec_json(NULL, factory, ext, &obj, NULL);
-    ASSERT(ext);
-    return obj;
-}
-
 /**********************************************************************/
 
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
@@ -310,10 +87,10 @@ static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
     Eterm Term = tp[1];
     Eterm bt = tp[2];
     Binary *bin = erts_magic_ref2bin(bt);
-    Eterm res = erts_term_to_json_int(BIF_P, Term, 0, 0,bin);
+    Eterm res = erts_term_to_json_int(BIF_P, Term, 0, bin);
     if (is_tuple(res)) {
 	ASSERT(BIF_P->flags & F_DISABLE_GC);
-	BIF_TRAP1(&term_to_json_trap_export,BIF_P,res);
+	BIF_TRAP1(&term_to_json_trap_export, BIF_P, res);
     } else {
         if (erts_set_gc_state(BIF_P, 1)
             || MSO(BIF_P).overhead > BIN_VHEAP_SZ(BIF_P))
@@ -325,35 +102,35 @@ static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
 
 HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 1)
 
+/* erlang:term_to_json/1 entry point. */
 BIF_RETTYPE term_to_json_1(BIF_ALIST_1)
 {
-    Eterm res = erts_term_to_json_int(BIF_P, BIF_ARG_1, 0, TERM_TO_JSON_DFLAGS, NULL);
+    Eterm res = erts_term_to_json_int(BIF_P, BIF_ARG_1, TERM_TO_JSON_DFLAGS, NULL);
     if (is_tuple(res)) {
 	erts_set_gc_state(BIF_P, 0);
-	BIF_TRAP1(&term_to_json_trap_export,BIF_P,res);
+	BIF_TRAP1(&term_to_json_trap_export, BIF_P, res);
     } else {
 	ASSERT(!(BIF_P->flags & F_DISABLE_GC));
 	BIF_RET(res);
     }
 }
 
+#if 0
 HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 2)
 
+/* erlang:term_to_json/2 entry point. */
 BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 {
     Process* p = BIF_P;
     Eterm Term = BIF_ARG_1;
     Eterm Flags = BIF_ARG_2;
-    int level = 0;
     Uint flags = TERM_TO_JSON_DFLAGS;
     Eterm res;
 
     while (is_list(Flags)) {
 	Eterm arg = CAR(list_val(Flags));
 	Eterm* tp;
-	if (arg == am_compressed) {
-	    level = Z_DEFAULT_COMPRESSION;
-	} else if (is_tuple(arg) && *(tp = tuple_val(arg)) == make_arityval(2)) {
+	if (is_tuple(arg) && *(tp = tuple_val(arg)) == make_arityval(2)) {
 	    if (tp[1] == am_minor_version && is_small(tp[2])) {
 		switch (signed_val(tp[2])) {
 		case 0:
@@ -366,11 +143,6 @@ BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
                     flags = TERM_TO_JSON_DFLAGS | DFLAG_UTF8_ATOMS;
 		    break;
 		default:
-		    goto error;
-		}
-	    } else if (tp[1] == am_compressed && is_small(tp[2])) {
-		level = signed_val(tp[2]);
-		if (!(0 <= level && level < 10)) {
 		    goto error;
 		}
 	    } else {
@@ -386,7 +158,7 @@ BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 	goto error;
     }
 
-    res = erts_term_to_json_int(p, Term, level, flags, NULL);
+    res = erts_term_to_json_int(p, Term, flags, NULL);
     if (is_tuple(res)) {
 	erts_set_gc_state(p, 0);
 	BIF_TRAP1(&term_to_json_trap_export,BIF_P,res);
@@ -394,245 +166,6 @@ BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 	ASSERT(!(BIF_P->flags & F_DISABLE_GC));
 	BIF_RET(res);
     }
-}
-
-
-enum B2TState { /* order is somewhat significant */
-    B2TPrepare,
-    B2TUncompressChunk,
-    B2TSizeInit,
-    B2TSize,
-    B2TDecodeInit,
-    B2TDecode,
-    B2TDecodeList,
-    B2TDecodeTuple,
-    B2TDecodeString,
-    B2TDecodeBinary,
-
-    B2TDone,
-    B2TDecodeFail,
-    B2TBadArg
-};
-
-typedef struct {
-    int heap_size;
-    int terms;
-    byte* ep;
-    int atom_extra_skip;
-} B2TSizeContext;
-
-typedef struct {
-    byte*  ep;
-    Eterm  res;
-    Eterm* next;
-    ErtsHeapFactory factory;
-    int remaining_n;
-    char* remaining_bytes;
-    ErtsWStack flat_maps;
-    ErtsPStack hamt_array;
-} B2TDecodeContext;
-
-typedef struct {
-    z_stream stream;
-    byte* dbytes;
-    Uint dleft;
-} B2TUncompressContext;
-
-typedef struct J2TContext_t {
-    Sint heap_size;
-    byte* aligned_alloc;
-    ErtsJson2TermState j2ts;
-    Uint32 flags;
-    SWord reds;
-    Eterm trap_bin;
-    Export *bif;
-    Eterm arg[2];
-    enum J2TState state;
-    union {
-	J2TSizeContext sc;
-	J2TDecodeContext dc;
-	J2TUncompressContext uc;
-    } u;
-} J2TContext;
-
-static J2TContext* j2t_export_context(Process*, J2TContext* src);
-
-static ERTS_INLINE int
-json2term_prepare(ErtsJson2TermState *state, byte *data, Sint data_size,
-		  J2TContext** ctxp, Process* p)
-{
-    byte *bytes = data;
-    Sint size = data_size;
-
-    state->exttmp = 0;
-
-    if (size < 1 || *bytes != VERSION_MAGIC) {
-	return -1;
-    }
-    bytes++;
-    size--;
-    if (size < 5 || *bytes != COMPRESSED) {
-	state->extp = bytes;
-        if (ctxp)
-	    (*ctxp)->state = B2TSizeInit;
-    }
-    else  {
-	uLongf dest_len = (Uint32) get_int32(bytes+1);
-	bytes += 5;
-	size -= 5;
-	if (dest_len > 32*1024*1024
-	    || (state->extp = erts_alloc_fnf(ERTS_ALC_T_EXT_TERM_DATA, dest_len)) == NULL) {
-            /*
-             * Try avoid out-of-memory crash due to corrupted 'dest_len'
-             * by checking the actual length of the uncompressed data.
-             * The only way to do that is to uncompress it. Sad but true.
-             */
-	    if (dest_len != json2term_uncomp_size(bytes, size)) {
-                return -1;
-	    }
-	    state->extp = erts_alloc(ERTS_ALC_T_EXT_TERM_DATA, dest_len);
-            if (ctxp)
-                (*ctxp)->reds -= dest_len;
-	}
-	state->exttmp = 1;
-        if (ctxp) {
-            /*
-             * Start decompression by exporting trap context
-             * so we don't have to deal with deep-copying z_stream.
-             */
-            B2TContext* ctx = b2t_export_context(p, *ctxp);
-            ASSERT(state = &(*ctxp)->b2ts);
-            state = &ctx->b2ts;
-
-	    if (erl_zlib_inflate_start(&ctx->u.uc.stream, bytes, size) != Z_OK)
-		return -1;
-
-	    ctx->u.uc.dbytes = state->extp;
-	    ctx->u.uc.dleft = dest_len;
-	    ctx->state = B2TUncompressChunk;
-            *ctxp = ctx;
-        }
-	else {
-	    uLongf dlen = dest_len;
-	    if (erl_zlib_uncompress(state->extp, &dlen, bytes, size) != Z_OK
-		|| dlen != dest_len) {
-		return -1;
-	    }
-        }
-	size = (Sint) dest_len;
-    }
-    state->extsize = size;
-    return 0;
-}
-
-static ERTS_INLINE void
-json2term_abort(ErtsJson2TermState *state)
-{
-    if (state->exttmp) {
-	state->exttmp = 0;
-	erts_free(ERTS_ALC_T_EXT_TERM_DATA, state->extp);
-    }
-}
-
-static ERTS_INLINE Eterm
-json2term_create(ErtsDistExternal *edep, ErtsJson2TermState *state,
-		 ErtsHeapFactory* factory)
-{
-    Eterm res;
-
-    if (!dec_json(edep, factory, state->extp, &res, NULL))
-	res = THE_NON_VALUE;
-    if (state->exttmp) {
-	state->exttmp = 0;
-	erts_free(ERTS_ALC_T_EXT_TERM_DATA, state->extp);
-    }
-    return res;
-}
-
-Sint
-erts_json2term_prepare(ErtsJson2TermState *state, byte *data, Sint data_size)
-{
-    Sint res;
-
-    if (json2term_prepare(state, data, data_size, NULL, NULL) < 0 ||
-        (res=decoded_size(state->extp, state->extp + state->extsize, 0, NULL)) < 0) {
-
-        if (state->exttmp)
-            erts_free(ERTS_ALC_T_EXT_TERM_DATA, state->extp);
-        state->extp = NULL;
-	state->exttmp = 0;
-	return -1;
-    }
-    return res;
-}
-
-void
-erts_json2term_abort(ErtsJsonTermState *state)
-{
-    json2term_abort(state);
-}
-
-Eterm
-erts_json2term_create(ErtsJson2TermState *state, ErtsHeapFactory* factory)
-{
-    return json2term_create(NULL,state, factory);
-}
-
-static void j2t_destroy_context(J2TContext* context)
-{
-    erts_free_aligned_binary_bytes_extra(context->aligned_alloc,
-                                         ERTS_ALC_T_EXT_TERM_DATA);
-    context->aligned_alloc = NULL;
-    json2term_abort(&context->b2ts);
-    switch (context->state) {
-    case J2TUncompressChunk:
-	erl_zlib_inflate_finish(&context->u.uc.stream);
-	break;
-    case J2TDecode:
-    case J2TDecodeList:
-    case J2TDecodeTuple:
-    case J2TDecodeString:
-    case J2TDecodeBinary:
-	if (context->u.dc.hamt_array.pstart) {
-	    erts_free(context->u.dc.hamt_array.alloc_type,
-		      context->u.dc.hamt_array.pstart);
-	}
-	break;
-    default:;
-    }
-}
-
-static int j2t_context_destructor(Binary *context_bin)
-{
-    J2TContext* ctx = (J2TContext*) ERTS_MAGIC_BIN_DATA(context_bin);
-    ASSERT(ERTS_MAGIC_BIN_DESTRUCTOR(context_bin) == j2t_context_destructor);
-
-    j2t_destroy_context(ctx);
-    return 1;
-}
-
-static BIF_RETTYPE json_to_term_trap_1(BIF_ALIST_1)
-{
-    Binary *context_bin = erts_magic_ref2bin(BIF_ARG_1);
-    ASSERT(ERTS_MAGIC_BIN_DESTRUCTOR(context_bin) == j2t_context_destructor);
-
-    return json_to_term_int(BIF_P, 0, THE_NON_VALUE, context_bin, NULL,
-			    THE_NON_VALUE, THE_NON_VALUE);
-}
-
-
-#define J2T_BYTES_PER_REDUCTION 128
-#define J2T_MEMCPY_FACTOR 8
-
-/* Define for testing */
-/*#define EXTREME_J2T_TRAPPING 1*/
-
-#ifdef EXTREME_J2T_TRAPPING
-static unsigned j2t_rand(void)
-{
-    static unsigned prev = 17;
-    prev = (prev * 214013 + 2531011);
-    return prev;
 }
 #endif
 
@@ -863,145 +396,35 @@ error:
     BIF_ERROR(BIF_P, BADARG);
 }
 
-Eterm
-external_size_1(BIF_ALIST_1)
-{
-    Process* p = BIF_P;
-    Eterm Term = BIF_ARG_1;
-
-    Uint size = erts_encode_ext_size(Term);
-    if (IS_USMALL(0, size)) {
-	BIF_RET(make_small(size));
-    } else {
-	Eterm* hp = HAlloc(p, BIG_UINT_HEAP_SIZE);
-	BIF_RET(uint_to_big(size, hp));
-    }
-}
-
-Eterm
-external_size_2(BIF_ALIST_2)
-{
-    Uint size;
-    Uint flags = TERM_TO_JSON_DFLAGS;
-
-    while (is_list(BIF_ARG_2)) {
-        Eterm arg = CAR(list_val(BIF_ARG_2));
-        Eterm* tp;
-
-        if (is_tuple(arg) && *(tp = tuple_val(arg)) == make_arityval(2)) {
-            if (tp[1] == am_minor_version && is_small(tp[2])) {
-                switch (signed_val(tp[2])) {
-                case 0:
-                    flags &= ~DFLAG_NEW_FLOATS;
-                    break;
-                case 1:
-                    break;
-                default:
-                    goto error;
-                }
-            } else {
-                goto error;
-            }
-        } else {
-        error:
-            BIF_ERROR(BIF_P, BADARG);
-        }
-        BIF_ARG_2 = CDR(list_val(BIF_ARG_2));
-    }
-    if (is_not_nil(BIF_ARG_2)) {
-        goto error;
-    }
-
-    size = erts_encode_ext_size_2(BIF_ARG_1, flags);
-    if (IS_USMALL(0, size)) {
-        BIF_RET(make_small(size));
-    } else {
-        Eterm* hp = HAlloc(BIF_P, BIG_UINT_HEAP_SIZE);
-        BIF_RET(uint_to_big(size, hp));
-    }
-}
-
 static Eterm
-erts_term_to_json_simple(Process* p, Eterm Term, Uint size, int level, Uint flags)
+erts_term_to_json_simple(Process* p, Eterm Term, Uint size, Uint flags)
 {
     Eterm bin;
     size_t real_size;
     byte* endp;
+    byte* bytes;
 
-    if (level != 0) {
-	byte buf[256];
-	byte* bytes = buf;
-	byte* out_bytes;
-	uLongf dest_len;
-
-	if (sizeof(buf) < size) {
-	    bytes = erts_alloc(ERTS_ALC_T_TMP, size);
-	}
-
-	if ((endp = enc_json(NULL, Term, bytes, flags, NULL))
-	    == NULL) {
-	    erts_exit(ERTS_ERROR_EXIT, "%s, line %d: bad term: %x\n",
-		     __FILE__, __LINE__, Term);
-	}
-	real_size = endp - bytes;
-	if (real_size > size) {
-	    erts_exit(ERTS_ERROR_EXIT, "%s, line %d: buffer overflow: %d word(s)\n",
-		     __FILE__, __LINE__, real_size - size);
-	}
-
-	/*
-	 * We don't want to compress if compression actually increases the size.
-	 * Therefore, don't give zlib more out buffer than the size of the
-	 * uncompressed external format (minus the 5 bytes needed for the
-	 * COMPRESSED tag). If zlib returns any error, we'll revert to using
-	 * the original uncompressed external term format.
-	 */
-
-	if (real_size < 5) {
-	    dest_len = 0;
-	} else {
-	    dest_len = real_size - 5;
-	}
-	bin = new_binary(p, NULL, real_size+1);
-	out_bytes = binary_bytes(bin);
-	out_bytes[0] = VERSION_MAGIC;
-	if (erl_zlib_compress2(out_bytes+6, &dest_len, bytes, real_size, level) != Z_OK) {
-	    sys_memcpy(out_bytes+1, bytes, real_size);
-	    bin = erts_realloc_binary(bin, real_size+1);
-	} else {
-	    out_bytes[1] = COMPRESSED;
-	    put_int32(real_size, out_bytes+2);
-	    bin = erts_realloc_binary(bin, dest_len+6);
-	}
-	if (bytes != buf) {
-	    erts_free(ERTS_ALC_T_TMP, bytes);
-	}
-	return bin;
-    } else {
-	byte* bytes;
-
-	bin = new_binary(p, (byte *)NULL, size);
-	bytes = binary_bytes(bin);
-	bytes[0] = VERSION_MAGIC;
-	if ((endp = enc_json(NULL, Term, bytes+1, flags, NULL))
-	    == NULL) {
-	    erts_exit(ERTS_ERROR_EXIT, "%s, line %d: bad term: %x\n",
-		     __FILE__, __LINE__, Term);
-	}
-	real_size = endp - bytes;
-	if (real_size > size) {
-	    erts_exit(ERTS_ERROR_EXIT, "%s, line %d: buffer overflow: %d word(s)\n",
-		     __FILE__, __LINE__, endp - (bytes + size));
-	}
-	return erts_realloc_binary(bin, real_size);
+    bin = new_binary(p, (byte *)NULL, size);
+    bytes = binary_bytes(bin);
+    bytes[0] = VERSION_MAGIC;
+    if ((endp = enc_json(NULL, Term, bytes+1, flags, NULL))
+	== NULL) {
+	erts_exit(ERTS_ERROR_EXIT, "%s, line %d: bad term: %x\n",
+		  __FILE__, __LINE__, Term);
     }
+    real_size = endp - bytes;
+    if (real_size > size) {
+	erts_exit(ERTS_ERROR_EXIT, "%s, line %d: buffer overflow: %d word(s)\n",
+		  __FILE__, __LINE__, endp - (bytes + size));
+    }
+    return erts_realloc_binary(bin, real_size);
 }
 
 Eterm
-erts_term_to_json(Process* p, Eterm Term, int level, Uint flags) {
+erts_term_to_json(Process* p, Eterm Term, Uint flags) {
     Uint size;
     size = encode_size_struct2(NULL, Term, flags) + 1 /* VERSION_MAGIC */;
-    return erts_term_to_json_simple(p, Term, size, level, flags);
+    return erts_term_to_json_simple(p, Term, size, flags);
 }
 
 /* Define EXTREME_TTB_TRAPPING for testing in dist.h */
@@ -1050,8 +473,7 @@ static int ttb_context_destructor(Binary *context_bin)
     return 1;
 }
 
-static Eterm erts_term_to_json_int(Process* p, Eterm Term, int level, Uint flags,
-				   Binary *context_b)
+static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
 {
     Eterm *hp;
     Eterm res;
@@ -1065,13 +487,14 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, int level, Uint flags
     TTBContext c_buff;
     TTBContext *context = &c_buff;
 
+
 #define EXPORT_CONTEXT()						\
     do {								\
 	if (context_b == NULL) {					\
 	    context_b = erts_create_magic_binary(sizeof(TTBContext),    \
                                                  ttb_context_destructor);   \
 	    context =  ERTS_MAGIC_BIN_DATA(context_b);			\
-	    memcpy(context,&c_buff,sizeof(TTBContext));			\
+	    memcpy(context, &c_buff, sizeof(TTBContext));		\
 	}								\
     } while (0)
 
@@ -1082,7 +505,7 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, int level, Uint flags
 	res = TUPLE2(hp, Term, c_term);					\
 	BUMP_ALL_REDS(p);                                               \
 	return res;							\
-    } while (0);
+    } while (0)
 
 
     if (context_b == NULL) {
@@ -1091,185 +514,39 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, int level, Uint flags
 	context->alive = 1;
 	context->s.sc.wstack.wstart = NULL;
 	context->s.sc.flags = flags;
-	context->s.sc.level = level;
     } else {
 	context = ERTS_MAGIC_BIN_DATA(context_b);
     }
-    /* Initialization done, now we will go through the states */
-    for (;;) {
-	switch (context->state) {
-	case TTBSize:
-	    {
-		Uint size;
-		Binary *result_bin;
-		int level;
-		Uint flags;
-		/* Try for fast path */
-		if (encode_size_struct_int(&context->s.sc, NULL, Term,
-					   context->s.sc.flags, &reds, &size) < 0) {
-		    EXPORT_CONTEXT();
-		    /* Same state */
-		    RETURN_STATE();
-		}
-		++size; /* VERSION_MAGIC */
-		/* Move these to next state */
-		flags = context->s.sc.flags;
-		level = context->s.sc.level;
-		if (size <=  ERL_ONHEAP_BIN_LIMIT) {
-		    /* Finish in one go */
-		    res = erts_term_to_json_simple(p, Term, size,
-						   level, flags);
-		    BUMP_REDS(p, 1);
-		    return res;
-		}
 
-		result_bin = erts_bin_nrml_alloc(size);
-		result_bin->orig_bytes[0] = (byte)VERSION_MAGIC;
-		/* Next state immediately, no need to export context */
-		context->state = TTBEncode;
-		context->s.ec.flags = flags;
-		context->s.ec.level = level;
-		context->s.ec.wstack.wstart = NULL;
-		context->s.ec.result_bin = result_bin;
-		break;
-	    }
-	case TTBEncode:
-	    {
-		byte *endp;
-		byte *bytes = (byte *) context->s.ec.result_bin->orig_bytes;
-		size_t real_size;
-		Binary *result_bin;
+    byte *endp;
+    byte *bytes = (byte *) context->s.ec.result_bin->orig_bytes;
+    size_t real_size;
+    Binary *result_bin;
 
-		flags = context->s.ec.flags;
-		if (enc_json_int(&context->s.ec, NULL,Term, bytes+1, flags, NULL, &reds, &endp) < 0) {
-		    EXPORT_CONTEXT();
-		    RETURN_STATE();
-		}
-		real_size = endp - bytes;
-		result_bin = erts_bin_realloc(context->s.ec.result_bin,real_size);
-		level = context->s.ec.level;
-		BUMP_REDS(p, (initial_reds - reds) / TERM_TO_JSON_LOOP_FACTOR);
-		if (level == 0 || real_size < 6) { /* We are done */
-		    ProcBin* pb;
-		return_normal:
-		    context->s.ec.result_bin = NULL;
-		    context->alive = 0;
-		    pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
-		    pb->thing_word = HEADER_PROC_BIN;
-		    pb->size = real_size;
-		    pb->next = MSO(p).first;
-		    MSO(p).first = (struct erl_off_heap_header*)pb;
-		    pb->val = result_bin;
-		    pb->bytes = (byte*) result_bin->orig_bytes;
-		    pb->flags = 0;
-		    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-		    if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
-			erts_bin_free(context_b);
-		    }
-		    return make_binary(pb);
-		}
-		/* Continue with compression... */
-		/* To make absolutely sure that zlib does not barf on a reallocated context,
-		   we make sure it's "exported" before doing anything compession-like */
-		EXPORT_CONTEXT();
-		bytes = (byte *) result_bin->orig_bytes; /* result_bin is reallocated */
-		if (erl_zlib_deflate_start(&(context->s.cc.stream),bytes+1,real_size-1,level)
-		    != Z_OK) {
-		    goto return_normal;
-		}
-		context->state = TTBCompress;
-		context->s.cc.real_size = real_size;
-		context->s.cc.result_bin = result_bin;
-
-		result_bin = erts_bin_nrml_alloc(real_size);
-		result_bin->orig_bytes[0] = (byte) VERSION_MAGIC;
-
-		context->s.cc.destination_bin = result_bin;
-		context->s.cc.dest_len = 0;
-		context->s.cc.dbytes = (byte *) result_bin->orig_bytes+6;
-		break;
-	    }
-	case TTBCompress:
-	    {
-		uLongf tot_dest_len = context->s.cc.real_size - 6;
-		uLongf left = (tot_dest_len - context->s.cc.dest_len);
-		uLongf this_time = (left > TERM_TO_JSON_COMPRESS_CHUNK) ?
-		    TERM_TO_JSON_COMPRESS_CHUNK :
-		    left;
-		Binary *result_bin;
-		ProcBin *pb;
-		Uint max = (ERTS_BIF_REDS_LEFT(p) *  TERM_TO_JSON_COMPRESS_CHUNK) / CONTEXT_REDS;
-
-		if (max < this_time) {
-		    this_time = max + 1; /* do not set this_time to 0 */
-		}
-
-		res = erl_zlib_deflate_chunk(&(context->s.cc.stream), context->s.cc.dbytes, &this_time);
-		context->s.cc.dbytes += this_time;
-		context->s.cc.dest_len += this_time;
-		switch (res) {
-		case Z_OK:
-		    if (context->s.cc.dest_len >= tot_dest_len) {
-			goto no_use_compressing;
-		    }
-		    RETURN_STATE();
-		case Z_STREAM_END:
-		    {
-			byte *dbytes = (byte *) context->s.cc.destination_bin->orig_bytes + 1;
-
-			dbytes[0] = COMPRESSED;
-			put_int32(context->s.cc.real_size-1,dbytes+1);
-			erl_zlib_deflate_finish(&(context->s.cc.stream));
-			result_bin = erts_bin_realloc(context->s.cc.destination_bin,
-						      context->s.cc.dest_len+6);
-			context->s.cc.destination_bin = NULL;
-			pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
-			pb->thing_word = HEADER_PROC_BIN;
-			pb->size = context->s.cc.dest_len+6;
-			pb->next = MSO(p).first;
-			MSO(p).first = (struct erl_off_heap_header*)pb;
-			pb->val = result_bin;
-			ASSERT(erts_refc_read(&result_bin->intern.refc, 1));
-			pb->bytes = (byte*) result_bin->orig_bytes;
-			pb->flags = 0;
-			OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-			erts_bin_free(context->s.cc.result_bin);
-			context->s.cc.result_bin = NULL;
-			context->alive = 0;
-			BUMP_REDS(p, (this_time * CONTEXT_REDS) / TERM_TO_JSON_COMPRESS_CHUNK);
-			if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
-			    erts_bin_free(context_b);
-			}
-			return make_binary(pb);
-		    }
-		default: /* Compression error, revert to uncompressed binary (still in
-			    context) */
-		no_use_compressing:
-		    result_bin = context->s.cc.result_bin;
-		    context->s.cc.result_bin = NULL;
-		    pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
-		    pb->thing_word = HEADER_PROC_BIN;
-		    pb->size = context->s.cc.real_size;
-		    pb->next = MSO(p).first;
-		    MSO(p).first = (struct erl_off_heap_header*)pb;
-		    pb->val = result_bin;
-		    pb->bytes = (byte*) result_bin->orig_bytes;
-		    pb->flags = 0;
-		    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-		    ASSERT(erts_refc_read(&result_bin->intern.refc, 1));
-		    erl_zlib_deflate_finish(&(context->s.cc.stream));
-		    erts_bin_free(context->s.cc.destination_bin);
-		    context->s.cc.destination_bin = NULL;
-		    context->alive = 0;
-		    BUMP_REDS(p, (this_time * CONTEXT_REDS) / TERM_TO_JSON_COMPRESS_CHUNK);
-		    if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
-			erts_bin_free(context_b);
-		    }
-		    return make_binary(pb);
-		}
-	    }
-	}
+    flags = context->s.ec.flags;
+    if (enc_json_int(&context->s.ec, NULL, Term, bytes+1, flags, NULL, &reds, &endp) < 0) {
+	EXPORT_CONTEXT();
+	RETURN_STATE();
     }
+    real_size = endp - bytes;
+    result_bin = erts_bin_realloc(context->s.ec.result_bin, real_size);
+    BUMP_REDS(p, (initial_reds - reds) / TERM_TO_JSON_LOOP_FACTOR);
+    ProcBin* pb;
+    context->s.ec.result_bin = NULL;
+    context->alive = 0;
+    pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
+    pb->thing_word = HEADER_PROC_BIN;
+    pb->size = real_size;
+    pb->next = MSO(p).first;
+    MSO(p).first = (struct erl_off_heap_header*)pb;
+    pb->val = result_bin;
+    pb->bytes = (byte*) result_bin->orig_bytes;
+    pb->flags = 0;
+    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
+    if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
+	erts_bin_free(context_b);
+    }
+    return make_binary(pb);
 #undef EXPORT_CONTEXT
 #undef RETURN_STATE
 }
@@ -1283,16 +560,19 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, int level, Uint flags
 #define ENC_LAST_ARRAY_ELEMENT ((Eterm) 6)
 
 static byte*
-enc_json(ErtsAtomCacheMap *acmp, Eterm obj, byte* ep, Uint32 dflags,
+enc_json(Eterm obj, byte* ep, Uint32 dflags,
 	 struct erl_off_heap_header** off_heap)
 {
     byte *res;
-    (void) enc_json_int(NULL, acmp, obj, ep, dflags, off_heap, NULL, &res);
+    (void) enc_json_int(NULL, obj, ep, dflags, off_heap, NULL, &res);
     return res;
 }
 
+/* Interruptable JSON encoder.  Returns 0 when term is completely encoded, or
+   -1 when out of reductions. */
+
 static int
-enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep, Uint32 dflags,
+enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags,
 	     struct erl_off_heap_header** off_heap, Sint *reds, byte **res)
 {
     DECLARE_WSTACK(s);
@@ -1318,6 +598,14 @@ enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
 	}
     }
 
+
+#define ENSURE_BUFFER(n)
+    do {
+	if () {
+	}
+    } while (0)
+
+
     goto L_jump_start;
 
  outer_loop:
@@ -1335,16 +623,16 @@ enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
 
 		obj = CAR(cons);
 		tl = CDR(cons);
-		WSTACK_PUSH2(s, (is_list(tl) ? ENC_ONE_CONS : ENC_TERM),
-			     tl);
+		ENSURE_BUFFER(1);
+		if (is_list(tl)) {
+		    *ep++ = ',',
+		    WSTACK_PUSH2(s, ENC_ONE_CONS, tl);
+		} else {
+		    *ep++ = ']';
+		    WSTACK_PUSH2(s, ENC_TERM, tl);
+		}
 	    }
 	    break;
-	case ENC_PATCH_FUN_SIZE:
-	    {
-		byte* size_p = (byte *) obj;
-		put_int32(ep - size_p, size_p);
-	    }
-	    goto outer_loop;
 	case ENC_BIN_COPY: {
 	    Uint bits = (Uint)obj;
 	    Uint bitoffs = WSTACK_POP(s);
@@ -1410,47 +698,34 @@ enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
 	    WSTACK_SAVE(s, &ctx->wstack);
 	    return -1;
 	}
+
 	switch(tag_val_def(obj)) {
 	case NIL_DEF:
-	    *ep++ = NIL_EXT;
+	    ENSURE_BUFFER(2);
+	    *ep++ = '['; *ep++ = ']';
 	    break;
 
 	case ATOM_DEF:
-	    ep = enc_atom(acmp,obj,ep,dflags);
-	    break;
-
-	case SMALL_DEF:
-	    {
-		/* From R14B we no longer restrict INTEGER_EXT to 28 bits,
-		 * as done earlier for backward compatibility reasons. */
-		Sint val = signed_val(obj);
-
-		if ((Uint)val < 256) {
-		    *ep++ = SMALL_INTEGER_EXT;
-		    put_int8(val, ep);
-		    ep++;
-		} else if (sizeof(Sint) == 4 || IS_SSMALL32(val)) {
-		    *ep++ = INTEGER_EXT;
-		    put_int32(val, ep);
-		    ep += 4;
-		} else {
-		    DeclareTmpHeapNoproc(tmp_big,2);
-		    Eterm big;
-		    UseTmpHeapNoproc(2);
-		    big = small_to_big(val, tmp_big);
-		    *ep++ = SMALL_BIG_EXT;
-		    n = big_bytes(big);
-		    ASSERT(n < 256);
-		    put_int8(n, ep);
-		    ep += 1;
-		    *ep++ = big_sign(big);
-		    ep = big_to_bytes(big, ep);
-		    UnUseTmpHeapNoproc(2);
-		}
+	    switch (atom_type(ep)) {
+		ATOM_TRUE:  ENSURE_BUFFER(4); *ep++ = 't'; *ep++ = 'r'; *ep++ = 'u'; *ep++ = 'e'; break;
+		ATOM_FALSE: ENSURE_BUFFER(5); *ep++ = 'f'; *ep++ = 'a'; *ep++ = 'l'; *ep++ = 's'; *ep++ = 'e'; break;
+		ATOM_NULL:  ENSURE_BUFFER(4); *ep++ = 'n'; *ep++ = 'u'; *ep++ = 'l'; *ep++ = 'l'; break;
+		default:    goto fail;
 	    }
 	    break;
 
+	case SMALL_DEF: {
+	    // Emit a small integer.
+	    Sint val = signed_val(obj);
+	    ENSURE_BUFFER(30); // 20 chars is enough for -(2^63)-1.
+	    ep += sprintf("%lld", (long long) val); // This could probably be made faster.
+	}
+	    break;
+
 	case BIG_DEF:
+	    // Emit a big integer.
+	    goto fail;
+#if 0
 	    {
 		int sign = big_sign(obj);
 		n = big_bytes(obj);
@@ -1478,88 +753,12 @@ enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
 		ep = big_to_bytes(obj, ep);
 	    }
 	    break;
+#endif
 
-	case PID_DEF:
-	case EXTERNAL_PID_DEF:
-	    ep = enc_pid(acmp, obj, ep, dflags);
-	    break;
-
-	case REF_DEF:
-	case EXTERNAL_REF_DEF: {
-	    Uint32 *ref_num;
-	    Eterm sysname = (((dflags & DFLAG_INTERNAL_TAGS) && is_internal_ref(obj))
-			     ? INTERNAL_LOCAL_SYSNAME : ref_node_name(obj));
-            Uint32 creation = ref_creation(obj);
-            byte* tagp = ep++;
-
-	    ASSERT(dflags & DFLAG_EXTENDED_REFERENCES);
-
-	    erts_magic_ref_save_bin(obj);
-
-	    i = ref_no_numbers(obj);
-	    put_int16(i, ep);
-	    ep += 2;
-	    ep = enc_atom(acmp, sysname, ep, dflags);
-            if (creation <= ERTS_MAX_LOCAL_CREATION) {
-                *tagp = NEW_REFERENCE_EXT;
-                *ep++ = creation;
-            } else {
-                ASSERT(is_external_ref(obj));
-                *tagp = NEWER_REFERENCE_EXT;
-                put_int32(creation, ep);
-                ep += 4;
-            }
-	    ref_num = ref_numbers(obj);
-	    for (j = 0; j < i; j++) {
-		put_int32(ref_num[j], ep);
-		ep += 4;
-	    }
-	    break;
-	}
-	case PORT_DEF:
-	case EXTERNAL_PORT_DEF: {
-	    Eterm sysname = (((dflags & DFLAG_INTERNAL_TAGS) && is_internal_port(obj))
-			     ? INTERNAL_LOCAL_SYSNAME : port_node_name(obj));
-            Uint32 creation = port_creation(obj);
-            byte* tagp = ep++;
-
-	    ep = enc_atom(acmp, sysname, ep, dflags);
-	    j = port_number(obj);
-	    put_int32(j, ep);
-	    ep += 4;
-            if (creation <= ERTS_MAX_LOCAL_CREATION) {
-                *tagp = PORT_EXT;
-                *ep++ = creation;
-            } else {
-                ASSERT(is_external_port(obj));
-                *tagp = NEW_PORT_EXT;
-                put_int32(creation, ep);
-                ep += 4;
-            }
-	    break;
-	}
 	case LIST_DEF:
-	    {
-		int is_str;
-
-		i = is_external_string(obj, &is_str);
-		if (is_str) {
-		    *ep++ = STRING_EXT;
-		    put_int16(i, ep);
-		    ep += 2;
-		    while (is_list(obj)) {
-			Eterm* cons = list_val(obj);
-			*ep++ = unsigned_val(CAR(cons));
-			obj = CDR(cons);
-		    }
-		} else {
-		    *ep++ = LIST_EXT;
-		    put_int32(i, ep);
-		    ep += 4;
-		    goto encode_one_cons;
-		}
-	    }
-	    break;
+	    ENSURE_BUFFER(1);
+	    *ep++ = '[';
+	    goto encode_one_cons;
 
 	case TUPLE_DEF:
 	    ptr = tuple_val(obj);
@@ -1591,8 +790,7 @@ enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
 		    Eterm *kptr = flatmap_get_keys(mp);
 		    Eterm *vptr = flatmap_get_values(mp);
 
-		    WSTACK_PUSH4(s, (UWord)kptr, (UWord)vptr,
-				 ENC_MAP_PAIR, size);
+		    WSTACK_PUSH4(s, (UWord)kptr, (UWord)vptr, ENC_MAP_PAIR, size);
 		}
 	    } else {
 		Eterm hdr;
@@ -1628,212 +826,51 @@ enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
 		}
 	    }
 	    break;
+
 	case FLOAT_DEF:
 	    GET_DOUBLE(obj, f);
-	    if (dflags & DFLAG_NEW_FLOATS) {
-		*ep++ = NEW_FLOAT_EXT;
-#if defined(WORDS_BIGENDIAN) || defined(DOUBLE_MIDDLE_ENDIAN)
-		put_int32(f.fw[0], ep);
-		ep += 4;
-		put_int32(f.fw[1], ep);
-#else
-		put_int32(f.fw[1], ep);
-		ep += 4;
-		put_int32(f.fw[0], ep);
-#endif
-		ep += 4;
+	    ENSURE_BUFFER(40);
+	    ep += sprintf(ep, "%g", (double) f);
+	    break;
+
+	case BINARY_DEF: {
+	    Uint bitoffs;
+	    Uint bitsize;
+	    byte* bytes;
+
+	    ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
+
+	    if (bitsize != 0) { goto fail; }
+	    /* Plain old byte-sized binary. */
+
+	    Uint len = binary_size(obj);
+	    ENSURE_BUFFER(len + 2);
+
+	    if (ctx && len > r * TERM_TO_JSON_MEMCPY_FACTOR) {
+		WSTACK_PUSH5(s, (UWord)ep, (UWord)bytes, bitoffs,
+			     ENC_BIN_COPY, 8 * len);
+		ep += len + 2;
 	    } else {
-		*ep++ = FLOAT_EXT;
-
-		/* now the erts_snprintf which does the work */
-		i = sys_double_to_chars(f.fd, (char*) ep, (size_t)31);
-
-		/* Don't leave garbage after the float!  (Bad practice in general,
-		 * and Purify complains.)
-		 */
-		sys_memset(ep+i, 0, 31-i);
-		ep += 31;
+		*ep++ = '"';
+		copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
+		ep += len;
+		*ep++ = '"';
 	    }
-	    break;
-
-	case BINARY_DEF:
-	    {
-		Uint bitoffs;
-		Uint bitsize;
-		byte* bytes;
-		byte* data_dst;
-
-		ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
-		if (dflags & DFLAG_INTERNAL_TAGS) {
-		    ProcBin* pb = (ProcBin*) binary_val(obj);
-		    Uint bytesize = pb->size;
-		    if (pb->thing_word == HEADER_SUB_BIN) {
-			ErlSubBin* sub = (ErlSubBin*)pb;
-			pb = (ProcBin*) binary_val(sub->orig);
-			ASSERT(bytesize == sub->size);
-			bytesize += (bitoffs + bitsize + 7) / 8;
-		    }
-		    if (pb->thing_word == HEADER_PROC_BIN
-			&& heap_bin_size(bytesize) > PROC_BIN_SIZE) {
-			ProcBin tmp;
-			if (bitoffs || bitsize) {
-			    *ep++ = BIT_BINARY_INTERNAL_REF;
-			    *ep++ = bitoffs;
-			    *ep++ = bitsize;
-			}
-			else {
-			    *ep++ = BINARY_INTERNAL_REF;
-			}
-			if (pb->flags) {
-			    char* before_realloc = pb->val->orig_bytes;
-			    erts_emasculate_writable_binary(pb);
-			    bytes += (pb->val->orig_bytes - before_realloc);
-			}
-			erts_refc_inc(&pb->val->intern.refc, 2);
-
-			sys_memcpy(&tmp, pb, sizeof(ProcBin));
-			tmp.next = *off_heap;
-			tmp.bytes = bytes;
-			tmp.size = bytesize;
-			sys_memcpy(ep, &tmp, sizeof(ProcBin));
-			*off_heap = (struct erl_off_heap_header*) ep;
-			ep += sizeof(ProcBin);
-			break;
-		    }
-		}
-		if (bitsize == 0) {
-		    /* Plain old byte-sized binary. */
-		    *ep++ = BINARY_EXT;
-		    j = binary_size(obj);
-		    put_int32(j, ep);
-		    ep += 4;
-		    data_dst = ep;
-		    ep += j;
-		} else if (dflags & DFLAG_BIT_BINARIES) {
-		    /* Bit-level binary. */
-		    *ep++ = BIT_BINARY_EXT;
-		    j = binary_size(obj);
-		    put_int32((j+1), ep);
-		    ep += 4;
-		    *ep++ = bitsize;
-		    ep[j] = 0;	/* Zero unused bits at end of binary */
-		    data_dst = ep;
-		    ep += j + 1;
-		} else {
-		    /*
-		     * Bit-level binary, but the receiver doesn't support it.
-		     * Build a tuple instead.
-		     */
-		    *ep++ = SMALL_TUPLE_EXT;
-		    *ep++ = 2;
-		    *ep++ = BINARY_EXT;
-		    j = binary_size(obj);
-		    put_int32((j+1), ep);
-		    ep += 4;
-		    ep[j] = 0;	/* Zero unused bits at end of binary */
-		    data_dst = ep;
-		    ep += j+1;
-		    *ep++ = SMALL_INTEGER_EXT;
-		    *ep++ = bitsize;
-		}
-		if (ctx && j > r * TERM_TO_JSON_MEMCPY_FACTOR) {
-		    WSTACK_PUSH5(s, (UWord)data_dst, (UWord)bytes, bitoffs,
-				 ENC_BIN_COPY, 8*j + bitsize);
-		} else {
-		    copy_binary_to_buffer(data_dst, 0, bytes, bitoffs,
-					  8 * j + bitsize);
-		}
-	    }
-	    break;
-	case EXPORT_DEF:
-	    {
-		Export* exp = *((Export **) (export_val(obj) + 1));
-		if ((dflags & DFLAG_EXPORT_PTR_TAG) != 0) {
-		    *ep++ = EXPORT_EXT;
-		    ep = enc_atom(acmp, exp->info.mfa.module, ep, dflags);
-		    ep = enc_atom(acmp, exp->info.mfa.function, ep, dflags);
-		    ep = enc_json(acmp, make_small(exp->info.mfa.arity),
-                                  ep, dflags, off_heap);
-		} else {
-		    /* Tag, arity */
-		    *ep++ = SMALL_TUPLE_EXT;
-		    put_int8(2, ep);
-		    ep += 1;
-
-		    /* Module name */
-		    ep = enc_atom(acmp, exp->info.mfa.module, ep, dflags);
-
-		    /* Function name */
-		    ep = enc_atom(acmp, exp->info.mfa.function, ep, dflags);
-		}
-		break;
-	    }
-	    break;
-	case FUN_DEF:
-	    {
-		ErlFunThing* funp = (ErlFunThing *) fun_val(obj);
-		int ei;
-
-		if ((dflags & DFLAG_NEW_FUN_TAGS) != 0) {
-		    *ep++ = NEW_FUN_EXT;
-		    WSTACK_PUSH2(s, ENC_PATCH_FUN_SIZE,
-				 (UWord) ep); /* Position for patching in size */
-		    ep += 4;
-		    *ep = funp->arity;
-		    ep += 1;
-		    sys_memcpy(ep, funp->fe->uniq, 16);
-		    ep += 16;
-		    put_int32(funp->fe->index, ep);
-		    ep += 4;
-		    put_int32(funp->num_free, ep);
-		    ep += 4;
-		    ep = enc_atom(acmp, funp->fe->module, ep, dflags);
-		    ep = enc_json(acmp, make_small(funp->fe->old_index), ep, dflags, off_heap);
-		    ep = enc_json(acmp, make_small(funp->fe->old_uniq), ep, dflags, off_heap);
-		    ep = enc_pid(acmp, funp->creator, ep, dflags);
-		} else {
-		    /*
-		     * Communicating with an obsolete erl_interface or
-		     * jinterface node. Convert the fun to a tuple to
-		     * avoid crasching.
-		     */
-
-		    /* Tag, arity */
-		    *ep++ = SMALL_TUPLE_EXT;
-		    put_int8(5, ep);
-		    ep += 1;
-
-		    /* 'fun' */
-		    ep = enc_atom(acmp, am_fun, ep, dflags);
-
-		    /* Module name */
-		    ep = enc_atom(acmp, funp->fe->module, ep, dflags);
-
-		    /* Index, Uniq */
-		    *ep++ = INTEGER_EXT;
-		    put_int32(funp->fe->old_index, ep);
-		    ep += 4;
-		    *ep++ = INTEGER_EXT;
-		    put_int32(funp->fe->old_uniq, ep);
-		    ep += 4;
-
-		    /* Environment sub-tuple arity */
-		    ASSERT(funp->num_free < MAX_ARG);
-		    *ep++ = SMALL_TUPLE_EXT;
-		    put_int8(funp->num_free, ep);
-		    ep += 1;
-		}
-		for (ei = funp->num_free-1; ei > 0; ei--) {
-		    WSTACK_PUSH2(s, ENC_TERM, (UWord) funp->env[ei]);
-		}
-		if (funp->num_free != 0) {
-		    obj = funp->env[0];
-		    goto L_jump_start;
-		}
-	    }
-	    break;
 	}
+	    break;
+
+	case PID_DEF:
+	case EXTERNAL_PID_DEF:
+	case REF_DEF:
+	case EXTERNAL_REF_DEF:
+	case PORT_DEF:
+	case EXTERNAL_PORT_DEF:
+	case EXPORT_DEF:
+	case FUN_DEF:
+	default:
+	    goto fail;
     }
+
     DESTROY_WSTACK(s);
     if (ctx) {
 	ASSERT(ctx->wstack.wstart == NULL);
@@ -1841,47 +878,15 @@ enc_json_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
     }
     *res = ep;
     return 0;
-}
 
-static
-Uint
-is_external_string(Eterm list, int* p_is_string)
-{
-    Uint len = 0;
-
-    /*
-     * Calculate the length of the list as long as all characters
-     * are integers from 0 through 255.
-     */
-    while (is_list(list)) {
-	Eterm* consp = list_val(list);
-	Eterm hd = CAR(consp);
-
-	if (!is_byte(hd)) {
-	    break;
-	}
-	len++;
-	list = CDR(consp);
+fail:
+    DESTROY_WSTACK(s);
+    if (ctx) {
+	ASSERT(ctx->wstack.wstart == NULL);
+	*reds = r;
     }
-
-    /*
-     * If we have reached the end of the list, and we have
-     * not exceeded the maximum length of a string, this
-     * is a string.
-     */
-    *p_is_string = is_nil(list) && len < MAX_STRING_LEN;
-
-    /*
-     * Continue to calculate the length.
-     */
-    while (is_list(list)) {
-	Eterm* consp = list_val(list);
-	len++;
-	list = CDR(consp);
-    }
-    return len;
+    return 1;
 }
-
 
 struct dec_json_hamt
 {
@@ -2934,331 +1939,6 @@ error_hamt:
 
     return NULL;
 }
-
-/* returns the number of bytes needed to encode an object
-   to a sequence of bytes
-   N.B. That this must agree with to_external2() above!!!
-   (except for cached atoms) */
-static Uint encode_size_struct2(ErtsAtomCacheMap *acmp, Eterm obj, unsigned dflags) {
-    Uint res;
-    (void) encode_size_struct_int(NULL, acmp, obj, dflags, NULL, &res);
-    return res;
-}
-
-static int
-encode_size_struct_int(TTBSizeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj,
-		       unsigned dflags, Sint *reds, Uint *res)
-{
-    DECLARE_WSTACK(s);
-    Uint m, i, arity;
-    Uint result = 0;
-    Sint r = 0;
-
-    if (ctx) {
-	WSTACK_CHANGE_ALLOCATOR(s, ERTS_ALC_T_SAVED_ESTACK);
-	r = *reds;
-
-	if (ctx->wstack.wstart) { /* restore saved stack */
-	    WSTACK_RESTORE(s, &ctx->wstack);
-	    result = ctx->result;
-	    obj = ctx->obj;
-	}
-    }
-
-#define LIST_TAIL_OP ((0 << _TAG_PRIMARY_SIZE) | TAG_PRIMARY_HEADER)
-#define TERM_ARRAY_OP(N) (((N) << _TAG_PRIMARY_SIZE) | TAG_PRIMARY_HEADER)
-#define TERM_ARRAY_OP_DEC(OP) ((OP) - (1 << _TAG_PRIMARY_SIZE))
-
-
-    for (;;) {
-	ASSERT(!is_header(obj));
-
-	if (ctx && --r == 0) {
-	    *reds = r;
-	    ctx->obj = obj;
-	    ctx->result = result;
-	    WSTACK_SAVE(s, &ctx->wstack);
-	    return -1;
-	}
-	switch (tag_val_def(obj)) {
-	case NIL_DEF:
-	    result++;
-	    break;
-	case ATOM_DEF:
-	    if (dflags & DFLAG_INTERNAL_TAGS) {
-		if (atom_val(obj) >= (1<<16)) {
-		    result += 1 + 3;
-		}
-		else {
-		    result += 1 + 2;
-		}
-	    }
-	    else {
-		Atom *a = atom_tab(atom_val(obj));
-		int alen;
-		if ((dflags & DFLAG_UTF8_ATOMS) || a->latin1_chars < 0) {
-		    alen = a->len;
-		    result += 1 + 1 + alen;
-		    if (alen > 255) {
-			result++; /* ATOM_UTF8_EXT (not small) */
-		    }
-		}
-		else {
-		    alen = a->latin1_chars;
-		    result += 1 + 1 + alen;
-		    if (alen > 255 || !(dflags & DFLAG_SMALL_ATOM_TAGS))
-			result++; /* ATOM_EXT (not small) */
-		}
-		insert_acache_map(acmp, obj, dflags);
-	    }
-	    break;
-	case SMALL_DEF:
-	    {
-		Sint val = signed_val(obj);
-
-		if ((Uint)val < 256)
-		    result += 1 + 1;		/* SMALL_INTEGER_EXT */
-		else if (sizeof(Sint) == 4 || IS_SSMALL32(val))
-		    result += 1 + 4;		/* INTEGER_EXT */
-		else {
-		    DeclareTmpHeapNoproc(tmp_big,2);
-		    UseTmpHeapNoproc(2);
-		    i = big_bytes(small_to_big(val, tmp_big));
-		    result += 1 + 1 + 1 + i;	/* SMALL_BIG_EXT */
-		    UnUseTmpHeapNoproc(2);
-		}
-	    }
-	    break;
-	case BIG_DEF:
-	    i = big_bytes(obj);
-	    if (sizeof(Sint)==4 && i <= 4 && (big_digit(obj,0)-big_sign(obj)) < (1<<31))
-		result += 1 + 4;          /* INTEGER_EXT */
-	    else if (i < 256)
-		result += 1 + 1 + 1 + i;  /* tag,size,sign,digits */
-	    else
-		result += 1 + 4 + 1 + i;  /* tag,size,sign,digits */
-	    break;
-        case EXTERNAL_PID_DEF:
-            if (external_pid_creation(obj) > ERTS_MAX_LOCAL_CREATION)
-                result += 3;
-            /*fall through*/
-	case PID_DEF:
-	    result += (1 + encode_size_struct2(acmp, pid_node_name(obj), dflags) +
-		       4 + 4 + 1);
-	    break;
-        case EXTERNAL_REF_DEF:
-            if (external_ref_creation(obj) > ERTS_MAX_LOCAL_CREATION)
-                result += 3;
-            /*fall through*/
-	case REF_DEF:
-	    ASSERT(dflags & DFLAG_EXTENDED_REFERENCES);
-	    i = ref_no_numbers(obj);
-	    result += (1 + 2 + encode_size_struct2(acmp, ref_node_name(obj), dflags) +
-		       1 + 4*i);
-	    break;
-        case EXTERNAL_PORT_DEF:
-            if (external_port_creation(obj) > ERTS_MAX_LOCAL_CREATION)
-                result += 3;
-            /*fall through*/
-        case PORT_DEF:
-	    result += (1 + encode_size_struct2(acmp, port_node_name(obj), dflags) +
-		      4 + 1);
-	    break;
-	case LIST_DEF:
-	    if ((m = is_string(obj)) && (m < MAX_STRING_LEN)) {
-		result += m + 2 + 1;
-	    } else {
-		result += 5;
-		WSTACK_PUSH2(s, (UWord)CDR(list_val(obj)), (UWord)LIST_TAIL_OP);
-		obj = CAR(list_val(obj));
-		continue; /* big loop */
-	    }
-	    break;
-	case TUPLE_DEF:
-	    {
-		Eterm* ptr = tuple_val(obj);
-		arity = arityval(*ptr);
-		if (arity <= 0xff) {
-		    result += 1 + 1;
-		} else {
-		    result += 1 + 4;
-		}
-		if (arity > 1) {
-		    WSTACK_PUSH2(s, (UWord) (ptr + 2),
-				    (UWord) TERM_ARRAY_OP(arity-1));
-		}
-                else if (arity == 0) {
-		    break;
-                }
-		obj = ptr[1];
-		continue; /* big loop */
-	    }
-	case MAP_DEF:
-	    if (is_flatmap(obj)) {
-		flatmap_t *mp = (flatmap_t*)flatmap_val(obj);
-		Uint size = flatmap_get_size(mp);
-
-		result += 1 + 4; /* tag + 4 bytes size */
-
-                if (size) {
-		    WSTACK_PUSH4(s, (UWord) flatmap_get_values(mp),
-				    (UWord) TERM_ARRAY_OP(size),
-		                    (UWord) flatmap_get_keys(mp),
-				    (UWord) TERM_ARRAY_OP(size));
-		}
-	    } else {
-		Eterm *ptr;
-		Eterm hdr;
-		Uint node_sz;
-		ptr = boxed_val(obj);
-		hdr = *ptr;
-		ASSERT(is_header(hdr));
-		switch(hdr & _HEADER_MAP_SUBTAG_MASK) {
-		case HAMT_SUBTAG_HEAD_ARRAY:
-		    ptr++;
-		    node_sz = 16;
-		    result += 1 + 4; /* tag + 4 bytes size */
-		    break;
-		case HAMT_SUBTAG_HEAD_BITMAP:
-		    ptr++;
-		    result += 1 + 4; /* tag + 4 bytes size */
-		    /*fall through*/
-		case HAMT_SUBTAG_NODE_BITMAP:
-		    node_sz = hashmap_bitcount(MAP_HEADER_VAL(hdr));
-		    ASSERT(node_sz < 17);
-		    break;
-		default:
-		    erts_exit(ERTS_ERROR_EXIT, "bad header\r\n");
-		}
-
-		ptr++;
-		WSTACK_RESERVE(s, node_sz*2);
-		while(node_sz--) {
-                    if (is_list(*ptr)) {
-			WSTACK_FAST_PUSH(s, CAR(list_val(*ptr)));
-			WSTACK_FAST_PUSH(s, CDR(list_val(*ptr)));
-                    } else {
-			WSTACK_FAST_PUSH(s, *ptr);
-		    }
-		    ptr++;
-		}
-	    }
-	    break;
-	case FLOAT_DEF:
-	    if (dflags & DFLAG_NEW_FLOATS) {
-		result += 9;
-	    } else {
-		result += 32;   /* Yes, including the tag */
-	    }
-	    break;
-	case BINARY_DEF:
-	    if (dflags & DFLAG_INTERNAL_TAGS) {
-		ProcBin* pb = (ProcBin*) binary_val(obj);
-		Uint sub_extra = 0;
-		Uint tot_bytes = pb->size;
-		if (pb->thing_word == HEADER_SUB_BIN) {
-		    ErlSubBin* sub = (ErlSubBin*) pb;
-		    pb = (ProcBin*) binary_val(sub->orig);
-		    sub_extra = 2;  /* bitoffs and bitsize */
-		    tot_bytes += (sub->bitoffs + sub->bitsize+ 7) / 8;
-		}
-		if (pb->thing_word == HEADER_PROC_BIN
-		    && heap_bin_size(tot_bytes) > PROC_BIN_SIZE) {
-
-		    result += 1 + sub_extra + sizeof(ProcBin);
-		    break;
-		}
-	    }
-	    result += 1 + 4 + binary_size(obj) +
-		    5;			/* For unaligned binary */
-	    break;
-	case FUN_DEF:
-	    {
-		ErlFunThing* funp = (ErlFunThing *) fun_val(obj);
-
-		if ((dflags & DFLAG_NEW_FUN_TAGS) != 0) {
-		    result += 20+1+1+4;	/* New ID + Tag */
-		    result += 4; /* Length field (number of free variables */
-		    result += encode_size_struct2(acmp, funp->creator, dflags);
-		    result += encode_size_struct2(acmp, funp->fe->module, dflags);
-		    result += 2 * (1+4);	/* Index, Uniq */
-		} else {
-		    /*
-		     * Size when fun is mapped to a tuple.
-		     */
-		    result += 1 + 1; /* Tuple tag, arity */
-		    result += 1 + 1 + 2 +
-			atom_tab(atom_val(am_fun))->len; /* 'fun' */
-		    result += 1 + 1 + 2 +
-			atom_tab(atom_val(funp->fe->module))->len; /* Module name */
-		    result += 2 * (1 + 4); /* Index + Uniq */
-		    result += 1 + (funp->num_free < 0x100 ? 1 : 4);
-		}
-		if (funp->num_free > 1) {
-		    WSTACK_PUSH2(s, (UWord) (funp->env + 1),
-				    (UWord) TERM_ARRAY_OP(funp->num_free-1));
-		}
-		if (funp->num_free != 0) {
-		    obj = funp->env[0];
-		    continue; /* big loop */
-		}
-		break;
-	    }
-
-	case EXPORT_DEF:
-	    {
-		Export* ep = *((Export **) (export_val(obj) + 1));
-		result += 1;
-		result += encode_size_struct2(acmp, ep->info.mfa.module, dflags);
-		result += encode_size_struct2(acmp, ep->info.mfa.function, dflags);
-		result += encode_size_struct2(acmp, make_small(ep->info.mfa.arity), dflags);
-	    }
-	    break;
-
-	default:
-	    erts_exit(ERTS_ERROR_EXIT,"Internal data structure error (in encode_size_struct2)%x\n",
-		     obj);
-	}
-
-	if (WSTACK_ISEMPTY(s)) {
-	    break;
-	}
-	obj = (Eterm) WSTACK_POP(s);
-
-        if (is_header(obj)) {
-            switch (obj) {
-	    case LIST_TAIL_OP:
-		obj = (Eterm) WSTACK_POP(s);
-		if (is_list(obj)) {
-		    Eterm* cons = list_val(obj);
-
-		    WSTACK_PUSH2(s, (UWord)CDR(cons), (UWord)LIST_TAIL_OP);
-		    obj = CAR(cons);
-		}
-		break;
-
-	    case TERM_ARRAY_OP(1):
-		obj = *(Eterm*)WSTACK_POP(s);
-		break;
-	    default: { /* TERM_ARRAY_OP(N) when N > 1 */
-		Eterm* ptr = (Eterm*) WSTACK_POP(s);
-		WSTACK_PUSH2(s, (UWord) (ptr+1),
-			        (UWord) TERM_ARRAY_OP_DEC(obj));
-		obj = *ptr;
-	    }
-	    }
-	}
-    }
-
-    WSTACK_DESTROY(s);
-    if (ctx) {
-	ASSERT(ctx->wstack.wstart == NULL);
-	*reds = r;
-    }
-    *res = result;
-    return 0;
-}
-
 
 
 static Sint
