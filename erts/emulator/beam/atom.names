@@ -480,6 +480,7 @@ atom notempty_atstart
 atom notify
 atom notsup
 atom nouse_stdio
+atom null
 atom objects
 atom off_heap
 atom offset
