@@ -51,7 +51,8 @@
 static Export term_to_json_trap_export;
 
 // static byte* enc_json(Eterm, byte*, Uint32 flags);
-static int enc_json_int(struct TTBEncodeContext_*, Eterm obj, byte* ep, Uint32 flags, Sint *reds, byte **res);
+static int enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
+
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
 
 static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b);
@@ -189,6 +190,7 @@ erts_term_to_json(Process* p, Eterm Term, Uint flags) {
 
 /* Define EXTREME_TTB_TRAPPING for testing in dist.h */
 
+#define TERM_TO_JSON_INITIAL_SIZE 1024
 #define TERM_TO_JSON_LOOP_FACTOR TERM_TO_BINARY_LOOP_FACTOR
 #define TERM_TO_JSON_MEMCPY_FACTOR 8
 
@@ -210,9 +212,6 @@ static int ttj_context_destructor(Binary *context_bin)
 
 static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
 {
-    Eterm *hp;
-    Eterm res;
-    Eterm c_term;
 #ifndef EXTREME_TTB_TRAPPING
     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
 #else
@@ -221,18 +220,18 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
     Sint initial_reds = reds;
     TTBContext context_buf;
     TTBContext *context;
-    byte *endp = NULL;
     byte *bytes;
-    size_t real_size;
-    Binary *result_bin;
-    ProcBin* pb;
 
     if (context_b == NULL) {
-        /* Setup enough to get started */
-        context_buf.state = TTBEncode;
+        // First call; initialize context.
         context_buf.alive = 1;
-        context_buf.s.sc.wstack.wstart = NULL;
-        context_buf.s.sc.flags = flags;
+        context_buf.state = TTBEncode;
+        context_buf.s.ec.flags = flags;
+        context_buf.s.ec.level = 0; // unused
+        context_buf.s.ec.ep = NULL;
+        context_buf.s.ec.obj = NIL; // Would be nice if there was in invalid tag.
+        context_buf.s.ec.wstack.wstart = NULL;
+        context_buf.s.ec.result_bin = erts_bin_nrml_alloc(TERM_TO_JSON_INITIAL_SIZE);
         context = &context_buf;
     } else {
         context = ERTS_MAGIC_BIN_DATA(context_b);
@@ -241,37 +240,46 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
     bytes = (byte *) context->s.ec.result_bin->orig_bytes;
 
     flags = context->s.ec.flags;
-    if (enc_json_int(&context->s.ec, Term, bytes+1, flags, &reds, &endp) < 0) {
+    if (enc_json_int(&context->s.ec, Term, bytes, flags, &reds, &context->s.ec.result_bin) < 0) {
+        // Ran out of reductions; yield.
+        Eterm *hp;
+        Eterm c_term;
+        Eterm res;
+
         if (context_b == NULL) {
-            context_b = erts_create_magic_binary(sizeof(TTBContext), ttj_context_destructor);
+            context_b = erts_create_magic_binary(sizeof (TTBContext), ttj_context_destructor);
             context = ERTS_MAGIC_BIN_DATA(context_b);
-            memcpy(context, &context_buf, sizeof(TTBContext));
+            memcpy(context, &context_buf, sizeof (TTBContext));
         }
 
         hp = HAlloc(p, ERTS_MAGIC_REF_THING_SIZE+3);
         c_term = erts_mk_magic_ref(&hp, &MSO(p), context_b);
         res = TUPLE2(hp, Term, c_term);
         BUMP_ALL_REDS(p);
-        return res;
+        return res; // return `{Term, Context}'.
+    } else {
+        // Finished; create return value.
+        Binary *result_bin = context->s.ec.result_bin;
+        size_t real_size = result_bin->orig_size;
+        ProcBin* pb;
+
+        BUMP_REDS(p, (initial_reds - reds) / TERM_TO_JSON_LOOP_FACTOR);
+        context->s.ec.result_bin = NULL;
+        context->alive = 0;
+        pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
+        pb->thing_word = HEADER_PROC_BIN;
+        pb->size = real_size;
+        pb->next = MSO(p).first;
+        MSO(p).first = (struct erl_off_heap_header *) pb;
+        pb->val = result_bin;
+        pb->bytes = (byte *) result_bin->orig_bytes;
+        pb->flags = 0;
+        OH_OVERHEAD(&(MSO(p)), pb->size / sizeof (Eterm));
+        if (context_b && erts_refc_read(&context_b->intern.refc, 0) == 0) {
+            erts_bin_free(context_b);
+        }
+        return make_binary(pb);
     }
-    real_size = endp - bytes;
-    result_bin = erts_bin_realloc(context->s.ec.result_bin, real_size);
-    BUMP_REDS(p, (initial_reds - reds) / TERM_TO_JSON_LOOP_FACTOR);
-    context->s.ec.result_bin = NULL;
-    context->alive = 0;
-    pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
-    pb->thing_word = HEADER_PROC_BIN;
-    pb->size = real_size;
-    pb->next = MSO(p).first;
-    MSO(p).first = (struct erl_off_heap_header*)pb;
-    pb->val = result_bin;
-    pb->bytes = (byte*) result_bin->orig_bytes;
-    pb->flags = 0;
-    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-    if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
-        erts_bin_free(context_b);
-    }
-    return make_binary(pb);
 }
 
 #define ENC_TERM		((Eterm) 0)
@@ -295,17 +303,15 @@ enc_json(Eterm obj, byte* ep, Uint32 flags)
    -1 when out of reductions. */
 
 static int
-enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *reds, byte **res)
+enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg)
 {
-    DECLARE_WSTACK(s);
-    // Uint* ptr;
-    // Eterm val;
-    // FloatDef f;
-    Sint r = 0;
+    WSTACK_DECLARE(s);
+    Sint reds = 0;
+    byte *endp = (byte *) (*result_bin_arg)->orig_bytes + (*result_bin_arg)->orig_size;
 
     if (ctx) {
         WSTACK_CHANGE_ALLOCATOR(s, ERTS_ALC_T_SAVED_ESTACK);
-        r = *reds;
+        reds = *reds_arg;
 
         if (ctx->wstack.wstart) { /* restore saved stacks and byte pointer */
             WSTACK_RESTORE(s, &ctx->wstack);
@@ -320,8 +326,15 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 
 #define ENSURE_BUFFER(n)						\
     do {								\
-        if (0) {							\
-            ;								\
+        Uint needed_bytes = (n);					\
+        if (ep + needed_bytes > endp) {					\
+            Sint offset = ep - (byte *) (*result_bin_arg)->orig_bytes;	\
+            Uint needed_size = offset + needed_bytes;			\
+            Uint new_size = (*result_bin_arg)->orig_size;		\
+            do { new_size *= 2; } while (new_size < needed_size);	\
+            *result_bin_arg = erts_bin_realloc(*result_bin_arg, new_size); \
+            ep = (byte *) (*result_bin_arg)->orig_bytes + offset;	\
+            endp = (byte *) (*result_bin_arg)->orig_bytes + (*result_bin_arg)->orig_size; \
         }								\
     } while (0)
 
@@ -343,10 +356,7 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
             encode_array_element:
                 first = 1;
             }
-            cons = list_val(obj);
-            tail = CDR(cons);
-            obj = CAR(cons);
-            switch (tag_val_def(tail)) {
+            switch (tag_val_def(obj)) {
             case NIL_DEF:
                 ENSURE_BUFFER(1);
                 *ep++ = ']';
@@ -356,6 +366,9 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
                     ENSURE_BUFFER(1);
                     *ep++ = ',';
                 }
+                cons = list_val(obj);
+                tail = CDR(cons);
+                obj = CAR(cons);
                 WSTACK_PUSH2(s, ENC_ARRAY_ELEMENT, tail);
                 goto encode_term;
             }
@@ -371,34 +384,7 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
             enc_object_element:
                 first = 1;
             }
-            cons = list_val(obj);
-            tail = CDR(cons);
-            tuple = tuple_val(obj);
-            tuple_len = arityval(*tuple);
-            if (tuple_len != 2) { goto fail; }
-            if (tag_val_def(tuple[1] != BINARY_DEF)) { goto fail; }
-            // Encode key, which must be a binary.
-            {
-                Uint bitoffs;
-                Uint bitsize;
-                byte* bytes;
-                Uint len;
-
-                ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
-
-                if (bitsize != 0) { goto fail; }
-
-                len = binary_size(obj);
-                ENSURE_BUFFER(len + 3);
-
-                *ep++ = '"';
-                copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
-                ep += len;
-                *ep++ = '"';
-                *ep++ = ':';
-            }
-
-            switch (tag_val_def(tail)) {
+            switch (tag_val_def(obj)) {
             case NIL_DEF:
                 ENSURE_BUFFER(1);
                 *ep++ = '}';
@@ -408,29 +394,62 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
                     ENSURE_BUFFER(1);
                     *ep++ = ',';
                 }
+                cons = list_val(obj);
+                tail = CDR(cons);
+                obj = CAR(cons);
+                if (tag_val_def(obj) != TUPLE_DEF) { goto fail; }
+                tuple = tuple_val(obj);
+                tuple_len = arityval(*tuple);
+                if (tuple_len != 2) { goto fail; }
+                if (tag_val_def(tuple[1]) != BINARY_DEF) { goto fail; }
+                // Encode key, which must be a binary.
+                {
+                    Eterm key;
+                    Uint bitoffs;
+                    Uint bitsize;
+                    byte* bytes;
+                    Uint len;
+
+                    key = tuple[1];
+                    ERTS_GET_BINARY_BYTES(key, bytes, bitoffs, bitsize);
+
+                    if (bitsize != 0) { goto fail; }
+
+                    len = binary_size(key);
+                    ENSURE_BUFFER(len + 3);
+
+                    *ep++ = '"';
+                    copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
+                    ep += len;
+                    *ep++ = '"';
+                    *ep++ = ':';
+                }
+
                 WSTACK_PUSH2(s, ENC_OBJECT_ELEMENT, tail);
+                obj = tuple[2];
                 goto encode_term;
             }
             goto fail; // Not a proper list.
         }
 #if 0
         case ENC_BIN_COPY: {
+            // This is the code that would handle copying long binaries.
             Uint bits = (Uint)obj;
             Uint bitoffs = WSTACK_POP(s);
             byte* bytes = (byte*) WSTACK_POP(s);
             byte* dst = (byte*) WSTACK_POP(s);
-            if (bits > r * (TERM_TO_JSON_MEMCPY_FACTOR * 8)) {
-                Uint n = r * TERM_TO_JSON_MEMCPY_FACTOR;
+            if (bits > reds * (TERM_TO_JSON_MEMCPY_FACTOR * 8)) {
+                Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
                 WSTACK_PUSH5(s, (UWord)(dst + n), (UWord)(bytes + n), bitoffs,
                              ENC_BIN_COPY, bits - 8*n);
                 bits = 8*n;
                 copy_binary_to_buffer(dst, 0, bytes, bitoffs, bits);
                 obj = THE_NON_VALUE;
-                r = 0; /* yield */
+                reds = 0; /* yield */
                 break;
             } else {
                 copy_binary_to_buffer(dst, 0, bytes, bitoffs, bits);
-                r -= bits / (TERM_TO_JSON_MEMCPY_FACTOR * 8);
+                reds -= bits / (TERM_TO_JSON_MEMCPY_FACTOR * 8);
                 goto outer_loop;
             }
         }
@@ -462,8 +481,8 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
         }
 
     encode_term:
-        if (ctx && --r <= 0) {
-            *reds = 0;
+        if (ctx && --reds <= 0) {
+            *reds_arg = 0;
             ctx->obj = obj;
             ctx->ep = ep;
             WSTACK_SAVE(s, &ctx->wstack);
@@ -483,7 +502,8 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
                 ENSURE_BUFFER(4); *ep++ = 't'; *ep++ = 'r'; *ep++ = 'u'; *ep++ = 'e'; }
             else if (obj == am_false) {
                 ENSURE_BUFFER(5); *ep++ = 'f'; *ep++ = 'a'; *ep++ = 'l'; *ep++ = 's'; *ep++ = 'e'; }
-            else if (ERTS_IS_ATOM_STR("null", obj)) {
+            else if (obj == am_null) {
+            // else if (ERTS_IS_ATOM_STR("null", obj)) {
                 ENSURE_BUFFER(4); *ep++ = 'n'; *ep++ = 'u'; *ep++ = 'l'; *ep++ = 'l'; }
             else { goto fail; }
             break;
@@ -539,11 +559,18 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
             Eterm* tuple = tuple_val(obj);
             Uint tuple_len = arityval(*tuple);
             if (tuple_len != 1) { goto fail; }
-            if (tag_val_def(tuple[1] != LIST_DEF)) { goto fail; }
-            ENSURE_BUFFER(1);
-            *ep++ = '{';
-            obj = tuple[1];
-            goto enc_object_element;
+            switch (tag_val_def(tuple[1])) {
+            case NIL_DEF:
+                ENSURE_BUFFER(2);
+                *ep++ = '{'; *ep++ = '}';
+                goto outer_loop;
+            case LIST_DEF:
+                ENSURE_BUFFER(1);
+                *ep++ = '{';
+                obj = tuple[1];
+                goto enc_object_element;
+            }
+            goto fail;
         }
 
 #if 0
@@ -650,17 +677,18 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
     DESTROY_WSTACK(s);
     if (ctx) {
         ASSERT(ctx->wstack.wstart == NULL);
-        *reds = r;
+        *reds_arg = reds;
     }
-    *res = ep;
+    *result_bin_arg = erts_bin_realloc(*result_bin_arg, ep - (byte *) (*result_bin_arg)->orig_bytes);
     return 0;
 
 fail:
     DESTROY_WSTACK(s);
     if (ctx) {
         ASSERT(ctx->wstack.wstart == NULL);
-        *reds = r;
+        *reds_arg = reds;
     }
+    *result_bin_arg = erts_bin_realloc(*result_bin_arg, ep - (byte *) (*result_bin_arg)->orig_bytes);
     return 1;
 }
 
