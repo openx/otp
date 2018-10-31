@@ -649,9 +649,17 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 
         case FLOAT_DEF: {
             FloatDef f;
+            byte *epp;
             GET_DOUBLE(obj, f);
             ENSURE_BUFFER(24);
+            epp = ep;
             ep += sprintf((char *) ep, "%.15g", f.fd);
+            // Ensure that a double always contains a decimal point.
+            while (epp < ep) {
+                if (*epp++ == '.') { goto period_found; }
+            }
+            *ep++ = '.'; *ep++ = '0';
+            period_found:
             break;
         }
 
