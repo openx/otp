@@ -28,6 +28,8 @@
  * separate pass over the input first to calculate the size.
  */
 
+// #define EXTREME_TTB_TRAPPING 1
+
 #ifdef HAVE_CONFIG_H
 #  include "config.h"
 #endif
@@ -58,6 +60,8 @@ static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
 static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b);
 
 unsigned i64ToAsciiTable(char *dst, int64_t value);
+int json_enc_unicode(byte *d, byte *s, byte *send);
+
 
 
 void erts_init_json(void) {
@@ -191,8 +195,12 @@ erts_term_to_json(Process* p, Eterm Term, Uint flags) {
 #endif
 
 /* Define EXTREME_TTB_TRAPPING for testing in dist.h */
+#ifndef EXTREME_TTB_TRAPPING
+#define TERM_TO_JSON_INITIAL_SIZE 4096
+#else
+#define TERM_TO_JSON_INITIAL_SIZE 20
+#endif
 
-#define TERM_TO_JSON_INITIAL_SIZE 1024
 #define TERM_TO_JSON_LOOP_FACTOR TERM_TO_BINARY_LOOP_FACTOR
 #define TERM_TO_JSON_MEMCPY_FACTOR 8
 
@@ -217,7 +225,7 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 #ifndef EXTREME_TTB_TRAPPING
     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
 #else
-    Sint reds = 20; /* For testing */
+    Sint reds = 4; /* For testing */
 #endif
     Sint initial_reds = reds;
     TTBContext context_buf;
@@ -290,6 +298,10 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 // #define ENC_BIN_COPY		((Eterm) 3)
 // #define ENC_MAP_PAIR		((Eterm) 4)
 // #define ENC_HASHMAP_NODE	((Eterm) 5)
+
+// Max number of output bytes one Unicode character can expand to: \uXXXX.
+#define MAX_UTF8_EXPANSION 6
+#define NO_UNICODE 0
 
 #if 0
 static byte*
@@ -417,11 +429,20 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 		    if (bitsize != 0) { goto fail; }
 
 		    len = binary_size(key);
-		    ENSURE_BUFFER(len + 3);
+		    ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 3);
 
 		    *ep++ = '"';
+#if NO_UNICODE
 		    copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
 		    ep += len;
+#else
+		    if (bitoffs != 0) { goto fail; }
+		    {
+			int nbytes = json_enc_unicode(ep, bytes, bytes + len);
+			if (nbytes < 0) { goto fail; }
+			ep += nbytes;
+		    }
+#endif
 		    *ep++ = '"';
 		    *ep++ = ':';
 		}
@@ -645,7 +666,7 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	    /* Plain old byte-sized binary. */
 
 	    len = binary_size(obj);
-	    ENSURE_BUFFER(len + 2);
+	    ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 2);
 
 	    /* if (0 && ctx && len > r * TERM_TO_JSON_MEMCPY_FACTOR) { */
 	    /* 	WSTACK_PUSH5(s, (UWord)ep, (UWord)bytes, bitoffs, */
@@ -653,8 +674,17 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	    /* 	ep += len + 2; */
 	    /* } else { */
 		*ep++ = '"';
+#if NO_UNICODE
 		copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
 		ep += len;
+#else
+		if (bitoffs % 8 != 0) { goto fail; }
+		{
+		    int nbytes = json_enc_unicode(ep, bytes, bytes + len);
+		    if (nbytes < 0) { goto fail; }
+		    ep += nbytes;
+		}
+#endif
 		*ep++ = '"';
 	    /* } */
 	    break;
@@ -771,3 +801,68 @@ i64ToAsciiTable(char *dst, int64_t value)
 	return u64ToAsciiTable(dst, value);
     }
 }
+
+#define U4 0	 		// Four-byte Unicode.
+#define U3 1			// Three-byte Unicode.
+#define U2 2			// Two-byte Unicode.
+#define A  3			// Safe ASCII.
+// #define E2 0			// Escape with backslash.
+#define E6 4			// Escape as "\uHHHH".
+#define C  5			// Unicode continuation.
+#define B  6			// Bad character.
+
+static const byte unicode_enc_map[] = {
+//   0    1    2    3    4    5    6    7     8    9    A    B    C    D    E    F
+    E6,	 E6,  E6,  E6,  E6,  E6,  E6,  E6,  'b', 't', 'n',  E6,	 E6, 'r',  E6,  E6, // 0_
+    E6,	 E6,  E6,  E6,  E6,  E6,  E6,  E6,   E6,  E6,  E6,  E6,	 E6,  E6,  E6,  E6, // 1_
+     A,	  A, '"',   A,   A,   A,   A,   A,    A,   A,   A,   A,	  A,   A,   A,   A, // 2_
+     A,	  A,   A,   A,   A,   A,   A,   A,    A,   A,   A,   A,	  A,   A,   A,   A, // 3_
+
+     A,	  A,   A,   A,   A,   A,   A,   A,    A,   A,   A,   A,	  A,   A,   A,   A, // 4_
+     A,	  A,   A,   A,   A,   A,   A,   A,    A,   A,   A,   A,'\\',   A,   A,   A, // 5_
+     A,	  A,   A,   A,   A,   A,   A,   A,    A,   A,   A,   A,	  A,   A,   A,   A, // 6_
+     A,	  A,   A,   A,   A,   A,   A,   A,    A,   A,   A,   A,	  A,   A,   A,  E6, // 7_
+
+     B,	  B,   C,   C,   C,   C,   C,   C,    C,   C,   C,   C,	  C,   C,   C,   C, // 8_
+     C,	  C,   C,   C,   C,   C,   C,   C,    C,   C,   C,   C,	  C,   C,   C,   C, // 9_
+     C,	  C,   C,   C,   C,   C,   C,   C,    C,   C,   C,   C,	  C,   C,   C,   C, // A_
+     C,	  C,   C,   C,   C,   C,   C,   C,    C,   C,   C,   C,	  C,   C,   C,   C, // B_
+
+    U2,	 U2,  U2,  U2,  U2,  U2,  U2,  U2,   U2,  U2,  U2,  U2,	 U2,  U2,  U2,  U2, // C_
+    U2,	 U2,  U2,  U2,  U2,  U2,  U2,  U2,   U2,  U2,  U2,  U2,	 U2,  U2,  U2,  U2, // D_
+    U3,	 U3,  U3,  U3,  U3,  U3,  U3,  U3,   U3,  U3,  U3,  U3,	 U3,  U3,  U3,  U3, // E_
+    U4,	 U4,  U4,  U4,  U4,   B,   B,   B,    B,   B,   B,   B,	  B,   B,   B,   B, // F_
+};
+
+byte *
+json_encode_byte(byte *d, int ucs)
+{
+    const int low = (ucs >> 4) && 0xf;
+    const int high = ucs && 0xf;
+    *d++ = '0';
+    *d++ = '0';
+    *d++ = (low  < 10 ? '0' : ('A' - 10)) + low;
+    *d++ = (high < 10 ? '0' : ('A' - 10)) + high;
+    return d;
+}
+
+int
+json_enc_unicode(byte *d, byte *s, byte *send)
+{
+    const byte *dstart = d;
+    while (s < send) {
+	const byte code = unicode_enc_map[*s];
+	switch (code) {
+	case U4: *d++ = *s++; // FALL THROUGH
+	case U3: *d++ = *s++; // FALL THROUGH
+	case U2: *d++ = *s++; // FALL THROUGH
+	case A:  *d++ = *s++; continue;
+	case E6: *d++ = '\\'; *d++ = 'u'; d = json_encode_byte(d, *s++); continue;
+	case B: return -1;
+	case C: return -1;
+	default: *d++ = '\\'; *d++ = code; s++; continue;
+	}
+    }
+    return d - dstart;
+}
+
