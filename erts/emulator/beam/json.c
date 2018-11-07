@@ -63,7 +63,6 @@ unsigned i64ToAsciiTable(char *dst, int64_t value);
 int json_enc_unicode(byte *d, byte *s, byte *send);
 
 
-
 void erts_init_json(void) {
     erts_init_trap_export(&term_to_json_trap_export,
 			  am_erts_internal, am_term_to_json_trap, 1,
@@ -539,38 +538,19 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	    break;
 	}
 
-	case BIG_DEF:
+	case BIG_DEF: {
 	    // Emit a big integer.
-	    goto fail;
-#if 0
-	    {
-		int sign = big_sign(obj);
-		n = big_bytes(obj);
-		if (sizeof(Sint)==4 && n<=4) {
-		    Uint dig = big_digit(obj,0);
-		    Sint val = sign ? -dig : dig;
-		    if ((val<0) == sign) {
-			*ep++ = INTEGER_EXT;
-			put_int32(val, ep);
-			ep += 4;
-			break;
-		    }
-		}
-		if (n < 256) {
-		    *ep++ = SMALL_BIG_EXT;
-		    put_int8(n, ep);
-		    ep += 1;
-		}
-		else {
-		    *ep++ = LARGE_BIG_EXT;
-		    put_int32(n, ep);
-		    ep += 4;
-		}
-		*ep++ = sign;
-		ep = big_to_bytes(obj, ep);
-	    }
+	    // Each byte turns into at most 3 decimal digits + 1 for sign.
+	    Uint big_bufsize = big_bytes(obj) * 3 + 1;
+	    Uint n;
+	    ENSURE_BUFFER(big_bufsize);
+	    n = erts_big_to_binary_bytes(obj, ep, big_bufsize);
+	    // erts_big_to_binary writes the bytes at the end of the buffer,
+	    // so shift them to the beginning.
+	    if (n < big_bufsize) { memmove(ep, ep + big_bufsize - n, n); }
+	    ep += n;
+	}
 	    break;
-#endif
 
 	case LIST_DEF:
 	    ENSURE_BUFFER(1);
