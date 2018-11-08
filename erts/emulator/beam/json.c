@@ -50,10 +50,19 @@
 #include "erl_zlib.h"
 #include "erl_map.h"
 
+typedef struct T2JContext_struct {
+    int alive;
+    Uint flags;
+    byte *ep;
+    Eterm obj;
+    ErtsWStack wstack;
+    Binary *result_bin;
+} T2JContext;
+
 static Export term_to_json_trap_export;
 
 // static byte* enc_json(Eterm, byte*, Uint32 flags);
-static int enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
+static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
 
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
 
@@ -203,17 +212,16 @@ erts_term_to_json(Process* p, Eterm Term, Uint flags) {
 #define TERM_TO_JSON_LOOP_FACTOR TERM_TO_BINARY_LOOP_FACTOR
 #define TERM_TO_JSON_MEMCPY_FACTOR 8
 
-static int ttj_context_destructor(Binary *context_bin)
+static int t2j_context_destructor(Binary *context_bin)
 {
-    TTBContext *context = ERTS_MAGIC_BIN_DATA(context_bin);
+    T2JContext *context = ERTS_MAGIC_BIN_DATA(context_bin);
     if (context->alive) {
 	context->alive = 0;
-	ASSERT(context->state == TTBEncode);
-	DESTROY_SAVED_WSTACK(&context->s.ec.wstack);
-	if (context->s.ec.result_bin != NULL) { /* Set to NULL if ever made alive! */
-	    ASSERT(erts_refc_read(&(context->s.ec.result_bin->intern.refc), 1));
-	    erts_bin_free(context->s.ec.result_bin);
-	    context->s.ec.result_bin = NULL;
+	DESTROY_SAVED_WSTACK(&context->wstack);
+	if (context->result_bin != NULL) { /* Set to NULL if ever made alive! */
+	    ASSERT(erts_refc_read(&(context->result_bin->intern.refc), 1));
+	    erts_bin_free(context->result_bin);
+	    context->result_bin = NULL;
 	}
     }
     return 1;
@@ -227,36 +235,34 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
     Sint reds = 4; /* For testing */
 #endif
     Sint initial_reds = reds;
-    TTBContext context_buf;
-    TTBContext *context;
+    T2JContext context_buf;
+    T2JContext *context;
     byte *bytes;
 
     if (context_b == NULL) {
 	// First call; initialize context.
 	context_buf.alive = 1;
-	context_buf.state = TTBEncode;
-	context_buf.s.ec.flags = flags;
-	context_buf.s.ec.level = 0; // unused
-	context_buf.s.ec.ep = NULL;
-	context_buf.s.ec.obj = NIL; // Would be nice if there was in invalid tag.
-	context_buf.s.ec.wstack.wstart = NULL;
-	context_buf.s.ec.result_bin = erts_bin_nrml_alloc(TERM_TO_JSON_INITIAL_SIZE);
+	context_buf.flags = flags;
+	context_buf.ep = NULL;
+	context_buf.obj = THE_NON_VALUE;
+	context_buf.wstack.wstart = NULL;
+	context_buf.result_bin = erts_bin_nrml_alloc(TERM_TO_JSON_INITIAL_SIZE);
 	context = &context_buf;
     } else {
 	context = ERTS_MAGIC_BIN_DATA(context_b);
     }
 
-    bytes = (byte *) context->s.ec.result_bin->orig_bytes;
+    bytes = (byte *) context->result_bin->orig_bytes;
 
-    flags = context->s.ec.flags;
-    if (enc_json_int(&context->s.ec, Term, bytes, flags, &reds, &context->s.ec.result_bin) < 0) {
+    flags = context->flags;
+    if (enc_json_int(context, Term, bytes, flags, &reds, &context->result_bin) < 0) {
 	// Ran out of reductions; yield.
 	Eterm *hp;
 	Eterm c_term;
 	Eterm res;
 
 	if (context_b == NULL) {
-	    context_b = erts_create_magic_binary(sizeof (TTBContext), ttj_context_destructor);
+	    context_b = erts_create_magic_binary(sizeof (TTBContext), t2j_context_destructor);
 	    context = ERTS_MAGIC_BIN_DATA(context_b);
 	    memcpy(context, &context_buf, sizeof (TTBContext));
 	}
@@ -268,12 +274,12 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 	return res; // return `{Term, Context}'.
     } else {
 	// Finished; create return value.
-	Binary *result_bin = context->s.ec.result_bin;
+	Binary *result_bin = context->result_bin;
 	size_t real_size = result_bin->orig_size;
 	ProcBin* pb;
 
 	BUMP_REDS(p, (initial_reds - reds) / TERM_TO_JSON_LOOP_FACTOR);
-	context->s.ec.result_bin = NULL;
+	context->result_bin = NULL;
 	context->alive = 0;
 	pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
 	pb->thing_word = HEADER_PROC_BIN;
@@ -302,7 +308,6 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 
 // Max number of output bytes one Unicode character can expand to: \uXXXX.
 #define MAX_UTF8_EXPANSION 6
-#define NO_UNICODE 0
 
 #if 0
 static byte*
@@ -318,7 +323,7 @@ enc_json(Eterm obj, byte* ep, Uint32 flags)
    -1 when out of reductions. */
 
 static int
-enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg)
+enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg)
 {
     WSTACK_DECLARE(s);
     Sint reds = 0;
@@ -624,8 +629,9 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	case BINARY_DEF: {
 	    Uint bitoffs;
 	    Uint bitsize;
-	    byte* bytes;
+	    byte *bytes;
 	    Uint len;
+	    Sint strlen;
 
 	    ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
 
@@ -641,17 +647,17 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	    /* 	ep += len + 2; */
 	    /* } else { */
 		*ep++ = '"';
-#if NO_UNICODE
-		copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
-		ep += len;
-#else
-		if (bitoffs % 8 != 0) { goto fail; }
-		{
-		    int nbytes = json_enc_unicode(ep, bytes, bytes + len);
-		    if (nbytes < 0) { goto fail; }
-		    ep += nbytes;
+		if (bitoffs % 8 != 0) {
+		    byte *temp_alloc = NULL;
+		    byte *aligned_bytes = erts_get_aligned_binary_bytes(obj, &temp_alloc);
+		    if (aligned_bytes == NULL) { goto fail; }
+		    strlen = json_enc_unicode(ep, aligned_bytes, aligned_bytes + len);
+		    erts_free_aligned_binary_bytes(temp_alloc);
+		} else {
+		    strlen = json_enc_unicode(ep, bytes, bytes + len);
 		}
-#endif
+		if (strlen < 0) { goto fail; }
+		ep += strlen;
 		*ep++ = '"';
 	    /* } */
 	    break;
@@ -818,7 +824,7 @@ json_encode_byte(byte *d, int ucs)
     return d;
 }
 
-int
+Sint
 json_enc_unicode(byte *d, byte *s, byte *send)
 {
     const byte *dstart = d;
@@ -837,4 +843,3 @@ json_enc_unicode(byte *d, byte *s, byte *send)
     }
     return d - dstart;
 }
-
