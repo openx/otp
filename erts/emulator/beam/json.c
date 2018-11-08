@@ -297,7 +297,8 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 #define ENC_OBJECT_ELEMENT	((Eterm) 3) // Used for proplist object encoding.
 #define ENC_MAP_PAIR		((Eterm) 4) // Used for flatmap object encoding.
 #define ENC_MAP_VALUE		((Eterm) 5) // Used for flatmap object encoding.
-#define ENC_HASHMAP_NODE	((Eterm) 6)
+#define ENC_HASHMAP_NODE	((Eterm) 6) // Used for HAMT object encoding.
+#define ENC_HASHMAP_LAST	((Eterm) 7) // Used for HAMT object encoding.
 
 // Max number of output bytes one Unicode character can expand to: \uXXXX.
 #define MAX_UTF8_EXPANSION 6
@@ -511,16 +512,22 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	    *ep++ = ':';
 	    break;
 	case ENC_HASHMAP_NODE: {
-	    goto fail;
-#if 0
 	    if (is_list(obj)) { /* leaf node [K|V] */
-		ETerm *cons = list_val(obj);
+		Eterm *cons = list_val(obj);
 		WSTACK_PUSH2(s, ENC_MAP_VALUE, CDR(cons));
 		obj = CAR(cons);
+		if (ep[-1] != '{') {
+		    ENSURE_BUFFER(1);
+		    *ep++ = ',';
+		}
+		// Encode object key.
 	    }
 	    break;
-#endif
 	}
+	case ENC_HASHMAP_LAST:
+	    ENSURE_BUFFER(1);
+	    *ep++ = '}';
+	    goto outer_loop;
 	default:
 	    goto fail;
 	}
@@ -601,13 +608,12 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 
 	case MAP_DEF:
 	    // An erlang map is converted to a JSON object.
-	    ENSURE_BUFFER(2); // Enough for '{', and '}' if map is empty.
-	    *ep++ = '{';
-
 	    if (is_flatmap(obj)) {
 		flatmap_t *mp = (flatmap_t *) flatmap_val(obj);
 		Uint size = flatmap_get_size(mp);
 
+		ENSURE_BUFFER(2); // Enough for '{', and '}' if map is empty.
+		*ep++ = '{';
 		if (size > 0) {
 		    Eterm *kptr = flatmap_get_keys(mp);
 		    Eterm *vptr = flatmap_get_values(mp);
@@ -617,25 +623,23 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 		    *ep++ = '}';
 		}
 	    } else {
-		goto fail;
-#if 0
 		Uint node_sz;
 		Uint *ptr = boxed_val(obj);
-		Eterm hdr = *ptr;
-		// ptr[1] is arity.
+		Eterm hdr = *ptr++;
 		ASSERT(is_header(hdr));
+		ENSURE_BUFFER(1);
 		switch (hdr & _HEADER_MAP_SUBTAG_MASK) {
 		case HAMT_SUBTAG_HEAD_ARRAY:
-		    *ep++ = MAP_EXT;
-		    ptr++;
-		    put_int32(*ptr, ep); ep += 4;
+		    *ep++ = '{';
+		    ptr++; // Skip arity on map HEAD.
 		    node_sz = 16;
+		    WSTACK_PUSH2(s, ENC_HASHMAP_LAST, THE_NON_VALUE);
 		    break;
 		case HAMT_SUBTAG_HEAD_BITMAP:
-		    *ep++ = MAP_EXT;
-		    ptr++;
-		    put_int32(*ptr, ep); ep += 4;
-		    /*fall through*/
+		    *ep++ = '{';
+		    ptr++; // Skip arity on map HEAD.
+		    WSTACK_PUSH2(s, ENC_HASHMAP_LAST, THE_NON_VALUE);
+		    // FALL THROUGH
 		case HAMT_SUBTAG_NODE_BITMAP:
 		    node_sz = hashmap_bitcount(MAP_HEADER_VAL(hdr));
 		    ASSERT(node_sz < 17);
@@ -643,14 +647,11 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 		default:
 		    erts_exit(ERTS_ERROR_EXIT, "bad header\r\n");
 		}
-
-		ptr++;
-		WSTACK_RESERVE(s, node_sz*2);
-		while(node_sz--) {
+		WSTACK_RESERVE(s, node_sz * 2);
+		while (node_sz--) {
 		    WSTACK_FAST_PUSH(s, ENC_HASHMAP_NODE);
 		    WSTACK_FAST_PUSH(s, *ptr++);
 		}
-#endif
 	    }
 	    break;
 
