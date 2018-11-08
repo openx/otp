@@ -366,18 +366,14 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	case ENC_ARRAY_ELEMENT: {
 	    Eterm* cons;
 	    Eterm tail;
-	    int first = 0;
-	    if (0) {
-	    encode_array_element:
-		first = 1;
-	    }
+	  enc_array_element:
 	    switch (tag_val_def(obj)) {
 	    case NIL_DEF:
 		ENSURE_BUFFER(1);
 		*ep++ = ']';
 		goto outer_loop;
 	    case LIST_DEF:
-		if (! first) {
+		if (ep[-1] != '[') {
 		    ENSURE_BUFFER(1);
 		    *ep++ = ',';
 		}
@@ -390,22 +386,18 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	    goto fail; // Not a proper list.
 	}
 	case ENC_OBJECT_ELEMENT: {
-	    int first = 0;
 	    Eterm* cons;
 	    Eterm tail;
 	    Eterm* tuple;
 	    Uint tuple_len;
-	    if (0) {
-	    enc_object_element:
-		first = 1;
-	    }
+	  enc_object_element:
 	    switch (tag_val_def(obj)) {
 	    case NIL_DEF:
 		ENSURE_BUFFER(1);
 		*ep++ = '}';
 		goto outer_loop;
 	    case LIST_DEF:
-		if (! first) {
+		if (ep[-1] != '{') {
 		    ENSURE_BUFFER(1);
 		    *ep++ = ',';
 		}
@@ -585,7 +577,7 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
 	case LIST_DEF:
 	    ENSURE_BUFFER(1);
 	    *ep++ = '[';
-	    goto encode_array_element;
+	    goto enc_array_element;
 
 	case TUPLE_DEF: {
 	    // A single-element tuple containing a list represents a JSON object.
