@@ -295,10 +295,10 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 // #define ENC_BIN_COPY		((Eterm) 1)
 #define ENC_ARRAY_ELEMENT	((Eterm) 2)
 #define ENC_OBJECT_ELEMENT	((Eterm) 3) // Used for proplist object encoding.
-#define ENC_MAP_PAIR		((Eterm) 4) // Used for flatmap object encoding.
-#define ENC_MAP_VALUE		((Eterm) 5) // Used for flatmap object encoding.
-#define ENC_HASHMAP_NODE	((Eterm) 6) // Used for HAMT object encoding.
-#define ENC_HASHMAP_LAST	((Eterm) 7) // Used for HAMT object encoding.
+#define ENC_FLATMAP_PAIR	((Eterm) 4) // Used for flatmap object encoding.
+#define ENC_HASHMAP_NODE	((Eterm) 5) // Used for HAMT object encoding.
+#define ENC_MAP_VALUE		((Eterm) 6) // Flags value for object encoding.
+#define ENC_MAP_LAST		((Eterm) 7) // Flags end of object encoding.
 
 // Max number of output bytes one Unicode character can expand to: \uXXXX.
 #define MAX_UTF8_EXPANSION 6
@@ -386,6 +386,7 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
             goto fail; // Not a proper list.
         }
         case ENC_OBJECT_ELEMENT: {
+            // Encodes the proplist JSON object representation.
             Eterm* cons;
             Eterm tail;
             Eterm* tuple;
@@ -409,40 +410,8 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
                 tuple_len = arityval(*tuple);
                 if (tuple_len != 2) { goto fail; }
                 if (tag_val_def(tuple[1]) != BINARY_DEF) { goto fail; }
-                // Encode key, which must be a binary.
-                {
-                    Eterm key;
-                    Uint bitoffs;
-                    Uint bitsize;
-                    byte* bytes;
-                    Uint len;
-
-                    key = tuple[1];
-                    ERTS_GET_BINARY_BYTES(key, bytes, bitoffs, bitsize);
-
-                    if (bitsize != 0) { goto fail; }
-
-                    len = binary_size(key);
-                    ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 3);
-
-                    *ep++ = '"';
-#if NO_UNICODE
-                    copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
-                    ep += len;
-#else
-                    if (bitoffs != 0) { goto fail; }
-                    {
-                        int nbytes = json_enc_unicode(ep, bytes, bytes + len);
-                        if (nbytes < 0) { goto fail; }
-                        ep += nbytes;
-                    }
-#endif
-                    *ep++ = '"';
-                    *ep++ = ':';
-                }
-
-                WSTACK_PUSH2(s, ENC_OBJECT_ELEMENT, tail);
-                obj = tuple[2];
+                WSTACK_PUSH4(s, ENC_OBJECT_ELEMENT, tail, ENC_MAP_VALUE, tuple[2]);
+                obj = tuple[1];
                 goto encode_term;
             }
             goto fail; // Not a proper list.
@@ -470,39 +439,25 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
             }
         }
 #endif
-        case ENC_MAP_PAIR: {
+        case ENC_FLATMAP_PAIR: {
+            // Encodes the flatmap map implementation as a JSON object.
             Uint pairs_left = obj;
-            Eterm *vptr;
-            Eterm *kptr;
+            Eterm *vptr = (Eterm *) WSTACK_POP(s);
+            Eterm *kptr = (Eterm *) WSTACK_POP(s);
             ENSURE_BUFFER(1);
-            if (pairs_left == 0) {
-                *ep++ = '}';
-                goto outer_loop;
-            } else {
+            if (ep[-1] != '{') {
                 *ep++ = ',';
             }
-
-            if (0) {
-            enc_map_pair_first:
-                pairs_left = WSTACK_POP(s);
-            }
-            // Encodes the flatmap map implementation as a JSON object.
-            vptr = (Eterm *) WSTACK_POP(s);
-            kptr = (Eterm *) WSTACK_POP(s);
             obj = *kptr;
             if (--pairs_left > 0) {
-                WSTACK_PUSH4(s, (UWord)(kptr+1), (UWord)(vptr+1), ENC_MAP_PAIR, pairs_left);
+                WSTACK_PUSH4(s, (UWord)(kptr+1), (UWord)(vptr+1), ENC_FLATMAP_PAIR, pairs_left);
             } else {
-                WSTACK_PUSH2(s, ENC_MAP_PAIR, 0);
+                WSTACK_PUSH2(s, ENC_MAP_LAST, THE_NON_VALUE);
             }
             WSTACK_PUSH2(s, ENC_MAP_VALUE, *vptr);
             // Encode object key.
             break;
         }
-        case ENC_MAP_VALUE:
-            ENSURE_BUFFER(1);
-            *ep++ = ':';
-            break;
         case ENC_HASHMAP_NODE: {
             if (is_list(obj)) { /* leaf node [K|V] */
                 Eterm *cons = list_val(obj);
@@ -516,7 +471,11 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
             }
             break;
         }
-        case ENC_HASHMAP_LAST:
+        case ENC_MAP_VALUE:
+            ENSURE_BUFFER(1);
+            *ep++ = ':';
+            break;
+        case ENC_MAP_LAST:
             ENSURE_BUFFER(1);
             *ep++ = '}';
             goto outer_loop;
@@ -571,8 +530,8 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
             // so shift them to the beginning.
             if (n < big_bufsize) { memmove(ep, ep + big_bufsize - n, n); }
             ep += n;
-        }
             break;
+        }
 
         case LIST_DEF:
             ENSURE_BUFFER(1);
@@ -609,8 +568,7 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
                 if (size > 0) {
                     Eterm *kptr = flatmap_get_keys(mp);
                     Eterm *vptr = flatmap_get_values(mp);
-                    WSTACK_PUSH3(s, (UWord) kptr, (UWord) vptr, size);
-                    goto enc_map_pair_first;
+                    WSTACK_PUSH4(s, (UWord) kptr, (UWord) vptr, ENC_FLATMAP_PAIR, size);
                 } else {
                     *ep++ = '}';
                 }
@@ -625,12 +583,12 @@ enc_json_int(TTBEncodeContext* ctx, Eterm obj, byte* ep, Uint32 dflags, Sint *re
                     *ep++ = '{';
                     ptr++; // Skip arity on map HEAD.
                     node_sz = 16;
-                    WSTACK_PUSH2(s, ENC_HASHMAP_LAST, THE_NON_VALUE);
+                    WSTACK_PUSH2(s, ENC_MAP_LAST, THE_NON_VALUE);
                     break;
                 case HAMT_SUBTAG_HEAD_BITMAP:
                     *ep++ = '{';
                     ptr++; // Skip arity on map HEAD.
-                    WSTACK_PUSH2(s, ENC_HASHMAP_LAST, THE_NON_VALUE);
+                    WSTACK_PUSH2(s, ENC_MAP_LAST, THE_NON_VALUE);
                     // FALL THROUGH
                 case HAMT_SUBTAG_NODE_BITMAP:
                     node_sz = hashmap_bitcount(MAP_HEADER_VAL(hdr));
