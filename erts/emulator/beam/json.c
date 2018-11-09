@@ -69,7 +69,7 @@ static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
 static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b);
 
 unsigned i64ToAsciiTable(char *dst, int64_t value);
-int json_enc_unicode(byte *d, byte *s, byte *send);
+Sint json_enc_unicode(byte *d, byte *s, byte *send);
 
 
 void erts_init_json(void) {
@@ -298,16 +298,18 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 }
 
 #define ENC_TERM		((Eterm) 0)
-// #define ENC_BIN_COPY		((Eterm) 1)
-#define ENC_ARRAY_ELEMENT	((Eterm) 2)
-#define ENC_OBJECT_ELEMENT	((Eterm) 3) // Used for proplist object encoding.
-#define ENC_FLATMAP_PAIR	((Eterm) 4) // Used for flatmap object encoding.
-#define ENC_HASHMAP_NODE	((Eterm) 5) // Used for HAMT object encoding.
-#define ENC_MAP_VALUE		((Eterm) 6) // Flags value for object encoding.
-#define ENC_MAP_LAST		((Eterm) 7) // Flags end of object encoding.
+#define ENC_ARRAY_ELEMENT	((Eterm) 1)
+#define ENC_OBJECT_ELEMENT	((Eterm) 2) // Used for proplist object encoding.
+#define ENC_FLATMAP_PAIR	((Eterm) 3) // Used for flatmap object encoding.
+#define ENC_HASHMAP_NODE	((Eterm) 4) // Used for HAMT object encoding.
+#define ENC_MAP_VALUE		((Eterm) 5) // Flags value for object encoding.
+#define ENC_MAP_LAST		((Eterm) 6) // Flags end of object encoding.
+#define ENC_BIN_COPY		((Eterm) 7)
 
 // Max number of output bytes one Unicode character can expand to: \uXXXX.
 #define MAX_UTF8_EXPANSION 6
+
+#define IS_UTF8_CONTINUATION_BYTE(byte) (((byte) & 0xC0) == 0x80)
 
 #if 0
 static byte*
@@ -368,6 +370,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	switch (WSTACK_POP(s)) {
 	case ENC_TERM:
 	    break;
+
 	case ENC_ARRAY_ELEMENT: {
 	    Eterm* cons;
 	    Eterm tail;
@@ -390,6 +393,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    }
 	    goto fail; // Not a proper list.
 	}
+
 	case ENC_OBJECT_ELEMENT: {
 	    // Encodes the proplist JSON object representation.
 	    Eterm* cons;
@@ -421,29 +425,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    }
 	    goto fail; // Not a proper list.
 	}
-#if 0
-	case ENC_BIN_COPY: {
-	    // This is the code that would handle copying long binaries.
-	    Uint bits = (Uint)obj;
-	    Uint bitoffs = WSTACK_POP(s);
-	    byte* bytes = (byte*) WSTACK_POP(s);
-	    byte* dst = (byte*) WSTACK_POP(s);
-	    if (bits > reds * (TERM_TO_JSON_MEMCPY_FACTOR * 8)) {
-		Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
-		WSTACK_PUSH5(s, (UWord)(dst + n), (UWord)(bytes + n), bitoffs,
-			     ENC_BIN_COPY, bits - 8*n);
-		bits = 8*n;
-		copy_binary_to_buffer(dst, 0, bytes, bitoffs, bits);
-		obj = THE_NON_VALUE;
-		reds = 0; /* yield */
-		break;
-	    } else {
-		copy_binary_to_buffer(dst, 0, bytes, bitoffs, bits);
-		reds -= bits / (TERM_TO_JSON_MEMCPY_FACTOR * 8);
-		goto outer_loop;
-	    }
-	}
-#endif
+
 	case ENC_FLATMAP_PAIR: {
 	    // Encodes the flatmap map implementation as a JSON object.
 	    Uint pairs_left = obj;
@@ -463,6 +445,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    // Encode object key.
 	    break;
 	}
+
 	case ENC_HASHMAP_NODE: {
 	    if (is_list(obj)) { /* leaf node [K|V] */
 		Eterm *cons = list_val(obj);
@@ -476,14 +459,55 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    }
 	    break;
 	}
+
 	case ENC_MAP_VALUE:
 	    ENSURE_BUFFER(1);
 	    *ep++ = ':';
 	    break;
+
 	case ENC_MAP_LAST:
 	    ENSURE_BUFFER(1);
 	    *ep++ = '}';
 	    goto outer_loop;
+
+	case ENC_BIN_COPY: {
+	    // Encode large binaries in parts.
+	    Uint len = (Uint) obj;
+	    byte *aligned_alloc = (byte *) WSTACK_POP(s);
+	    byte *bytes = (byte *) WSTACK_POP(s);
+	    Sint strlen;
+	    if (len > reds * TERM_TO_JSON_MEMCPY_FACTOR) {
+		Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
+		while (IS_UTF8_CONTINUATION_BYTE(bytes[n]) && n < len) { n++; }
+		WSTACK_PUSH4(s, (UWord) (bytes + n), (UWord) aligned_alloc, ENC_BIN_COPY, len - n);
+
+		ENSURE_BUFFER(MAX_UTF8_EXPANSION * n);
+		strlen = json_enc_unicode(ep, bytes, bytes + n);
+		if (strlen < 0) {
+		    if (aligned_alloc != NULL) {
+			erts_free_aligned_binary_bytes_extra(aligned_alloc, ERTS_ALC_T_BINARY_BUFFER);
+		    }
+		    goto fail;
+		}
+		ep += strlen;
+
+		obj = THE_NON_VALUE;
+		reds = 0; /* yield */
+		break;
+	    } else {
+		ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 1);
+		strlen = json_enc_unicode(ep, bytes, bytes + len);
+		if (aligned_alloc != NULL) {
+		    erts_free_aligned_binary_bytes_extra(aligned_alloc, ERTS_ALC_T_BINARY_BUFFER);
+		}
+		if (strlen < 0) { goto fail; }
+		ep += strlen;
+		*ep++ = '"';
+		reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
+		goto outer_loop;
+	    }
+	}
+
 	default:
 	    goto fail;
 	}
@@ -519,7 +543,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	case SMALL_DEF: {
 	    // Emit a small integer.
 	    Sint val = signed_val(obj);
-	    ENSURE_BUFFER(30); // 20 chars is enough for -(2^63)-1.
+	    ENSURE_BUFFER(22); // 20 chars is enough for -(2^63)-1 == -9223372036854775807.
 	    ep += i64ToAsciiTable((char *) ep, (long long) val);
 	    break;
 	}
@@ -627,6 +651,8 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	}
 
 	case BINARY_DEF: {
+	    byte *aligned_alloc = NULL;
+	    int chunked_conversion;
 	    Uint bitoffs;
 	    Uint bitsize;
 	    byte *bytes;
@@ -639,27 +665,31 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    /* Plain old byte-sized binary. */
 
 	    len = binary_size(obj);
-	    ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 2);
+	    chunked_conversion = ctx != NULL && len > reds * TERM_TO_JSON_MEMCPY_FACTOR;
+	    if (bitoffs % 8 != 0) {
+		bytes = erts_get_aligned_binary_bytes_extra(
+		    obj, &aligned_alloc,
+		    (chunked_conversion ? ERTS_ALC_T_BINARY_BUFFER : ERTS_ALC_T_TMP),
+		    0);
+		if (bytes == NULL) { goto fail; }
+	    }
 
-	    /* if (0 && ctx && len > r * TERM_TO_JSON_MEMCPY_FACTOR) { */
-	    /* 	WSTACK_PUSH5(s, (UWord)ep, (UWord)bytes, bitoffs, */
-	    /* 		     ENC_BIN_COPY, 8 * len); */
-	    /* 	ep += len + 2; */
-	    /* } else { */
+	    if (chunked_conversion) {
+		ENSURE_BUFFER(1);
 		*ep++ = '"';
-		if (bitoffs % 8 != 0) {
-		    byte *temp_alloc = NULL;
-		    byte *aligned_bytes = erts_get_aligned_binary_bytes(obj, &temp_alloc);
-		    if (aligned_bytes == NULL) { goto fail; }
-		    strlen = json_enc_unicode(ep, aligned_bytes, aligned_bytes + len);
-		    erts_free_aligned_binary_bytes(temp_alloc);
-		} else {
-		    strlen = json_enc_unicode(ep, bytes, bytes + len);
+	    	WSTACK_PUSH4(s, (UWord) bytes, (UWord) aligned_alloc, ENC_BIN_COPY, len);
+	    } else {
+		ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 2);
+		*ep++ = '"';
+		strlen = json_enc_unicode(ep, bytes, bytes + len);
+		if (aligned_alloc != NULL) {
+		    erts_free_aligned_binary_bytes_extra(aligned_alloc, ERTS_ALC_T_TMP);
 		}
 		if (strlen < 0) { goto fail; }
 		ep += strlen;
 		*ep++ = '"';
-	    /* } */
+		reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
+	    }
 	    break;
 	}
 
