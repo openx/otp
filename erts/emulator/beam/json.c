@@ -47,7 +47,6 @@
 #include "dist.h"
 #include "erl_binary.h"
 #include "erl_bits.h"
-#include "erl_zlib.h"
 #include "erl_map.h"
 
 typedef struct T2JContext_struct {
@@ -81,24 +80,15 @@ void erts_init_json(void) {
 /**********************************************************************/
 
 /* This function will be called to continue work when term_to_json_1 returns
-   via BIF_TRAP1 (or a related macro such as ERTS_BIF_PREP_TRAP1). */
+   via BIF_TRAP1. */
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
 {
     Eterm *tp = tuple_val(BIF_ARG_1);
     Eterm Term = tp[1];
     Eterm bt = tp[2];
-    Binary *bin = erts_magic_ref2bin(bt);
-    Eterm res = erts_term_to_json_int(BIF_P, Term, 0, bin);
-    if (is_tuple(res)) {
-	ASSERT(BIF_P->flags & F_DISABLE_GC);
-	BIF_TRAP1(&term_to_json_trap_export, BIF_P, res);
-    } else {
-        if (erts_set_gc_state(BIF_P, 1)
-            || MSO(BIF_P).overhead > BIN_VHEAP_SZ(BIF_P))
-            ERTS_BIF_YIELD_RETURN(BIF_P, res);
-        else
-            BIF_RET(res);
-    }
+    Binary *context = erts_magic_ref2bin(bt);
+
+    return erts_term_to_json_int(BIF_P, Term, /* TERM_TO_JSON_DFLAGS */ 0, context);
 }
 
 HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 1)
@@ -106,14 +96,7 @@ HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 1)
 /* erlang:term_to_json/1 entry point. */
 BIF_RETTYPE term_to_json_1(BIF_ALIST_1)
 {
-    Eterm res = erts_term_to_json_int(BIF_P, BIF_ARG_1, /* TERM_TO_JSON_DFLAGS */ 0, NULL);
-    if (is_tuple(res)) {
-	erts_set_gc_state(BIF_P, 0);
-	BIF_TRAP1(&term_to_json_trap_export, BIF_P, res);
-    } else {
-	ASSERT(!(BIF_P->flags & F_DISABLE_GC));
-	BIF_RET(res);
-    }
+    return erts_term_to_json_int(BIF_P, BIF_ARG_1, /* TERM_TO_JSON_DFLAGS */ 0, /* context */ NULL);
 }
 
 #if 0
@@ -227,7 +210,12 @@ static int t2j_context_destructor(Binary *context_bin)
     return 1;
 }
 
-static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
+#define JSON_YIELD	0
+#define JSON_BADARG	1
+#define JSON_DONE	2
+
+static BIF_RETTYPE
+erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
 {
 #ifndef EXTREME_TTB_TRAPPING
     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
@@ -235,12 +223,14 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
     Sint reds = 4; /* For testing */
 #endif
     Sint initial_reds = reds;
+    int is_first_call;
     T2JContext context_buf;
     T2JContext *context;
     byte *bytes;
 
     if (context_b == NULL) {
 	// First call; initialize context.
+	is_first_call = 1;
 	context_buf.alive = 1;
 	context_buf.flags = flags;
 	context_buf.ep = NULL;
@@ -249,30 +239,50 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 	context_buf.result_bin = erts_bin_nrml_alloc(TERM_TO_JSON_INITIAL_SIZE);
 	context = &context_buf;
     } else {
+	is_first_call = 0;
 	context = ERTS_MAGIC_BIN_DATA(context_b);
     }
 
     bytes = (byte *) context->result_bin->orig_bytes;
 
     flags = context->flags;
-    if (enc_json_int(context, Term, bytes, flags, &reds, &context->result_bin) < 0) {
+    switch (enc_json_int(context, Term, bytes, flags, &reds, &context->result_bin)) {
+    case JSON_YIELD: {
 	// Ran out of reductions; yield.
 	Eterm *hp;
 	Eterm c_term;
-	Eterm res;
 
 	if (context_b == NULL) {
 	    context_b = erts_create_magic_binary(sizeof (TTBContext), t2j_context_destructor);
 	    context = ERTS_MAGIC_BIN_DATA(context_b);
 	    memcpy(context, &context_buf, sizeof (TTBContext));
 	}
+	if (is_first_call) {
+	    erts_set_gc_state(p, 0);
+	}
 
 	hp = HAlloc(p, ERTS_MAGIC_REF_THING_SIZE+3);
 	c_term = erts_mk_magic_ref(&hp, &MSO(p), context_b);
-	res = TUPLE2(hp, Term, c_term);
 	BUMP_ALL_REDS(p);
-	return res; // return `{Term, Context}'.
-    } else {
+	BIF_TRAP1(&term_to_json_trap_export, p, TUPLE2(hp, Term, c_term));
+    }
+
+    case JSON_BADARG:
+	ASSERT(erts_refc_read(&context->result_bin->intern.refc, 1) == 1);
+	erts_bin_free(context->result_bin);
+	if (context_b && erts_refc_read(&context_b->intern.refc, 0) == 0) {
+	    erts_bin_free(context_b);
+	}
+
+	context->result_bin = NULL;
+	if (! is_first_call) {
+	    erts_set_gc_state(p, 1);
+	    ERTS_BIF_ERROR_TRAPPED1(p, EXC_BADARG, bif_export[BIF_term_to_json_1], Term);
+	} else {
+	    BIF_ERROR(p, EXC_BADARG);
+	}
+
+    case JSON_DONE: {
 	// Finished; create return value.
 	Binary *result_bin = context->result_bin;
 	size_t real_size = result_bin->orig_size;
@@ -293,8 +303,13 @@ static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *c
 	if (context_b && erts_refc_read(&context_b->intern.refc, 0) == 0) {
 	    erts_bin_free(context_b);
 	}
-	return make_binary(pb);
+	if (! is_first_call) {
+	    erts_set_gc_state(p, 1);
+	}
+	BIF_RET(make_binary(pb));
     }
+    }
+    abort();
 }
 
 #define ENC_TERM		((Eterm) 0)
@@ -518,7 +533,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    ctx->obj = obj;
 	    ctx->ep = ep;
 	    WSTACK_SAVE(s, &ctx->wstack);
-	    return -1;
+	    return JSON_YIELD;
 	}
 
 	// obj contains the next thing to encode.
@@ -669,7 +684,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    if (bitoffs % 8 != 0) {
 		bytes = erts_get_aligned_binary_bytes_extra(
 		    obj, &aligned_alloc,
-		    (chunked_conversion ? ERTS_ALC_T_BINARY_BUFFER : ERTS_ALC_T_TMP),
+		    (chunked_conversion ? ERTS_ALC_T_EXT_TERM_DATA : ERTS_ALC_T_TMP),
 		    0);
 		if (bytes == NULL) { goto fail; }
 	    }
@@ -714,7 +729,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	*reds_arg = reds;
     }
     *result_bin_arg = erts_bin_realloc(*result_bin_arg, ep - (byte *) (*result_bin_arg)->orig_bytes);
-    return 0;
+    return JSON_DONE;
 
 fail:
     DESTROY_WSTACK(s);
@@ -722,8 +737,10 @@ fail:
 	ASSERT(ctx->wstack.wstart == NULL);
 	*reds_arg = reds;
     }
-    *result_bin_arg = erts_bin_realloc(*result_bin_arg, ep - (byte *) (*result_bin_arg)->orig_bytes);
-    return 1;
+    // If we were going to return the partially-encoded JSON we would realloc
+    // the buffer here.
+    // *result_bin_arg = erts_bin_realloc(*result_bin_arg, ep - (byte *) (*result_bin_arg)->orig_bytes);
+    return JSON_BADARG;
 }
 
 
