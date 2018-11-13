@@ -351,6 +351,7 @@ atom invalid
 atom is_constant
 atom is_seq_trace
 atom io
+atom json
 atom keypos
 atom kill
 atom killed

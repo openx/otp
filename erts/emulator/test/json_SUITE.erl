@@ -4,9 +4,9 @@
          init_per_group/2, end_per_group/2,
          init_per_testcase/2, end_per_testcase/2,
          basic_types/1, integers/1, lists/1,
-         objects_proplist/1, objects_flatmap/1, objects_hamt/1,
+         objects_proplist/1, objects_flatmap/1, objects_hamt/1, objects_atomkey/1,
          unicode/1, binaries/1, bigints/1,
-         errors/1]).
+         preencoded/1, errors/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -14,7 +14,9 @@ suite() -> [{ct_hooks,[ts_install_cth]},
             {timetrap,{minutes,1}}].
 
 all() ->
-    [basic_types, integers, lists, objects_proplist, objects_flatmap, objects_hamt, unicode, binaries, bigints, errors].
+    [basic_types, integers, lists,
+     objects_proplist, objects_flatmap, objects_hamt, objects_atomkey,
+     unicode, binaries, bigints, preencoded, errors].
 
 groups() ->
     [].
@@ -169,6 +171,14 @@ objects_hamt(Config) when is_list(Config) ->
 
     ok.
 
+objects_atomkey(Config) when is_list(Config) ->
+    <<"{\"a\":\"apple\"}">> = erlang:term_to_json({[{a, <<"apple">>}]}),
+    <<"{\"1\":\"one\"}">> = erlang:term_to_json({[{'1', <<"one">>}]}),
+    Ole = <<"¡olé!"/utf8>>,
+    <<"{\"¡olé!\":\"bravo!\"}"/utf8>> = erlang:term_to_json({[{Ole, <<"bravo!">>}]}),
+    <<"{\"a\":\"apple\"}">> = erlang:term_to_json(#{a => <<"apple">>}),
+    ok.
+
 unicode(Config) when is_list(Config) ->
     <<"\"\\u0000\"">> = erlang:term_to_json(list_to_binary([0])),
     <<"\"\\b\"">> = erlang:term_to_json(<<"\b">>),
@@ -210,6 +220,24 @@ binaries(Config) when is_list(Config) ->
 bigints(Config) when is_list(Config) ->
     <<"1208925819614629174706176">> = erlang:term_to_json(1 bsl 80),
     <<"-604462909807314587353088">> = erlang:term_to_json(- 1 bsl 79),
+    ok.
+
+preencoded(Config) when is_list(Config) ->
+    <<"test">> = erlang:term_to_json({json, <<"test">>}),
+    <<"[1]">> = erlang:term_to_json([{json, <<"1">>}]),
+    <<"[1,2,3]">> = erlang:term_to_json([{json, <<"1,2,3">>}]),
+    <<"[1,2,3]">> = erlang:term_to_json([1, {json, <<"2,3">>}]),
+    <<"[1,2,3]">> = erlang:term_to_json([{json, <<"1,2">>}, 3]),
+    <<"[1,2,3]">> = erlang:term_to_json([1, {json, <<"2">>}, 3]),
+    <<"{test}">> = erlang:term_to_json({[{json, <<"test">>}]}),
+    <<"{\"t\":test}">> = erlang:term_to_json({[{<<"t">>, {json, <<"test">>}}]}),
+    <<"{\"a\":1,\"b\":2}">> = erlang:term_to_json({[{json, <<"\"a\":1">>}, {<<"b">>, 2}]}),
+    <<"{\"a\":1,\"b\":2}">> = erlang:term_to_json({[{<<"a">>, 1}, {json, <<"\"b\":2">>}]}),
+    <<"{test}">> = erlang:term_to_json(#{json => <<"test">>}),
+    LongBinary = list_to_binary([$", lists:duplicate(1000, <<"0123456789">>), $"]),
+    LongBinaryExpect = <<$[, LongBinary/binary, $]>>,
+    LongBinaryActual = erlang:term_to_json([{json, LongBinary}]),
+    ?assertEqual(LongBinaryExpect, LongBinaryActual),
     ok.
 
 errors(Config) when is_list(Config) ->

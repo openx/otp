@@ -434,13 +434,19 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
                 tuple = tuple_val(obj);
                 tuple_len = arityval(*tuple);
                 if (tuple_len != 2) { goto fail; }
-                WSTACK_PUSH4(s, ENC_OBJECT_ELEMENT, tail, ENC_MAP_VALUE, tuple[2]);
                 obj = tuple[1];
-                // Encode object key.
-                switch (tag_val_def(obj)) {
-                case BINARY_DEF:	goto encode_term;
-                case ATOM_DEF:		goto enc_map_atom_key;
-                default:		goto fail;
+                if (obj == am_json) {
+                    WSTACK_PUSH2(s, ENC_OBJECT_ELEMENT, tail);
+                    obj = tuple[2];
+                    goto enc_preencoded_json;
+                } else {
+                    WSTACK_PUSH4(s, ENC_OBJECT_ELEMENT, tail, ENC_MAP_VALUE, tuple[2]);
+                    // Encode object key.
+                    switch (tag_val_def(obj)) {
+                    case BINARY_DEF: goto encode_term;
+                    case ATOM_DEF: goto enc_map_atom_key;
+                    default: goto fail;
+                    }
                 }
             }
             goto fail; // Not a proper list.
@@ -461,12 +467,17 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
             } else {
                 WSTACK_PUSH2(s, ENC_MAP_LAST, THE_NON_VALUE);
             }
-            WSTACK_PUSH2(s, ENC_MAP_VALUE, *vptr);
-            // Encode object key.
-            switch (tag_val_def(obj)) {
-            case BINARY_DEF:	goto encode_term;
-            case ATOM_DEF:	goto enc_map_atom_key;
-            default:		goto fail;
+            if (obj == am_json) {
+                obj = *vptr;
+                goto enc_preencoded_json;
+            } else {
+                WSTACK_PUSH2(s, ENC_MAP_VALUE, *vptr);
+                // Encode object key.
+                switch (tag_val_def(obj)) {
+                case BINARY_DEF: goto encode_term;
+                case ATOM_DEF: goto enc_map_atom_key;
+                default: goto fail;
+                }
             }
             break;
         }
@@ -474,17 +485,22 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
         case ENC_HASHMAP_NODE: {
             if (is_list(obj)) { /* leaf node [K|V] */
                 Eterm *cons = list_val(obj);
-                WSTACK_PUSH2(s, ENC_MAP_VALUE, CDR(cons));
                 obj = CAR(cons);
                 if (ep[-1] != '{') {
                     ENSURE_BUFFER(1);
                     *ep++ = ',';
                 }
-                // Encode object key.
-                switch (tag_val_def(obj)) {
-                case BINARY_DEF:	goto encode_term;
-                case ATOM_DEF:		goto enc_map_atom_key;
-                default:		goto fail;
+                if (obj == am_json) {
+                    obj = CDR(cons);
+                    goto enc_preencoded_json;
+                } else {
+                    WSTACK_PUSH2(s, ENC_MAP_VALUE, CDR(cons));
+                    // Encode object key.
+                    switch (tag_val_def(obj)) {
+                    case BINARY_DEF: goto encode_term;
+                    case ATOM_DEF: goto enc_map_atom_key;
+                    default: goto fail;
+                    }
                 }
             }
             break;
@@ -619,20 +635,40 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
             goto enc_array_element;
 
         case TUPLE_DEF: {
-            // A single-element tuple containing a list represents a JSON object.
             Eterm* tuple = tuple_val(obj);
-            Uint tuple_len = arityval(*tuple);
-            if (tuple_len != 1) { goto fail; }
-            switch (tag_val_def(tuple[1])) {
-            case NIL_DEF:
-                ENSURE_BUFFER(2);
-                *ep++ = '{'; *ep++ = '}';
+            switch (arityval(*tuple)) {
+            case 1:
+                // A single-element tuple containing a list represents a JSON object.
+                switch (tag_val_def(tuple[1])) {
+                case NIL_DEF:
+                    ENSURE_BUFFER(2);
+                    *ep++ = '{'; *ep++ = '}';
+                    goto outer_loop;
+                case LIST_DEF:
+                    ENSURE_BUFFER(1);
+                    *ep++ = '{';
+                    obj = tuple[1];
+                    goto enc_object_element;
+                }
+                goto fail;
+            case 2: {
+                byte *bytes;
+                Uint bitoffs;
+                Uint bitsize;
+                Uint len;
+                if (tuple[1] != am_json) { goto fail; };
+                obj = tuple[2];
+              enc_preencoded_json:
+                if (tag_val_def(obj) != BINARY_DEF) { goto fail; }
+                ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
+                len = binary_size(obj);
+                if (bitsize != 0) { goto fail; }
+                if (bitoffs % 8 != 0) { goto fail; }
+                copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
+                ep += len;
+                reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
                 goto outer_loop;
-            case LIST_DEF:
-                ENSURE_BUFFER(1);
-                *ep++ = '{';
-                obj = tuple[1];
-                goto enc_object_element;
+            }
             }
             goto fail;
         }
@@ -705,9 +741,9 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
         case BINARY_DEF: {
             byte *aligned_alloc = NULL;
             int chunked_conversion;
+            byte *bytes;
             Uint bitoffs;
             Uint bitsize;
-            byte *bytes;
             Uint len;
             Sint strlen;
 
