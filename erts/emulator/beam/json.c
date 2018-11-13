@@ -576,14 +576,19 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
             break;
 
         case ATOM_DEF:
-            if      (obj == am_true) {
-                ENSURE_BUFFER(4); ep[0] = 't'; ep[1] = 'r'; ep[2] = 'u'; ep[3] = 'e'; ep += 4; }
-            else if (obj == am_false) {
-                ENSURE_BUFFER(5); ep[0] = 'f'; ep[1] = 'a'; ep[2] = 'l'; ep[3] = 's'; ep[4] = 'e'; ep += 5; }
-            else if (obj == am_null) {
-            // else if (ERTS_IS_ATOM_STR("null", obj)) {
-                ENSURE_BUFFER(4); ep[0] = 'n'; ep[1] = 'u'; ep[2] = 'l'; ep[3] = 'l'; ep += 4; }
-            else { goto fail; }
+            switch (obj) {
+            case am_true:
+                ENSURE_BUFFER(4); ep[0] = 't'; ep[1] = 'r'; ep[2] = 'u'; ep[3] = 'e'; ep += 4;
+                break;
+            case am_false:
+                ENSURE_BUFFER(5); ep[0] = 'f'; ep[1] = 'a'; ep[2] = 'l'; ep[3] = 's'; ep[4] = 'e'; ep += 5;
+                break;
+            case am_null:
+                ENSURE_BUFFER(4); ep[0] = 'n'; ep[1] = 'u'; ep[2] = 'l'; ep[3] = 'l'; ep += 4;
+                break;
+            default:
+                goto fail;
+            }
             break;
 
         case SMALL_DEF: {
@@ -708,8 +713,8 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 
             ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
 
+            // We don't handle bitstrings.
             if (bitsize != 0) { goto fail; }
-            /* Plain old byte-sized binary. */
 
             len = binary_size(obj);
             chunked_conversion = ctx != NULL && len > reds * TERM_TO_JSON_MEMCPY_FACTOR;
