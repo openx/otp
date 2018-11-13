@@ -317,9 +317,10 @@ erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
 #define ENC_OBJECT_ELEMENT	((Eterm) 2) // Used for proplist object encoding.
 #define ENC_FLATMAP_PAIR	((Eterm) 3) // Used for flatmap object encoding.
 #define ENC_HASHMAP_NODE	((Eterm) 4) // Used for HAMT object encoding.
-#define ENC_MAP_VALUE		((Eterm) 5) // Flags value for object encoding.
-#define ENC_MAP_LAST		((Eterm) 6) // Flags end of object encoding.
-#define ENC_BIN_COPY		((Eterm) 7)
+#define ENC_MAP_ATOM_KEY	((Eterm) 5)
+#define ENC_MAP_VALUE		((Eterm) 6) // Flags value for object encoding.
+#define ENC_MAP_LAST		((Eterm) 7) // Flags end of object encoding.
+#define ENC_BIN_COPY		((Eterm) 8)
 
 // Max number of output bytes one Unicode character can expand to: \uXXXX.
 #define MAX_UTF8_EXPANSION 6
@@ -433,10 +434,14 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		tuple = tuple_val(obj);
 		tuple_len = arityval(*tuple);
 		if (tuple_len != 2) { goto fail; }
-		if (tag_val_def(tuple[1]) != BINARY_DEF) { goto fail; }
 		WSTACK_PUSH4(s, ENC_OBJECT_ELEMENT, tail, ENC_MAP_VALUE, tuple[2]);
 		obj = tuple[1];
-		goto encode_term;
+		// Encode object key.
+		switch (tag_val_def(obj)) {
+		case BINARY_DEF:	goto encode_term;
+		case ATOM_DEF:		goto enc_map_atom_key;
+		default:		goto fail;
+		}
 	    }
 	    goto fail; // Not a proper list.
 	}
@@ -458,6 +463,11 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    }
 	    WSTACK_PUSH2(s, ENC_MAP_VALUE, *vptr);
 	    // Encode object key.
+	    switch (tag_val_def(obj)) {
+	    case BINARY_DEF:	goto encode_term;
+	    case ATOM_DEF:	goto enc_map_atom_key;
+	    default:		goto fail;
+	    }
 	    break;
 	}
 
@@ -471,8 +481,29 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		    *ep++ = ',';
 		}
 		// Encode object key.
+		switch (tag_val_def(obj)) {
+		case BINARY_DEF:	goto encode_term;
+		case ATOM_DEF:		goto enc_map_atom_key;
+		default:		goto fail;
+		}
 	    }
 	    break;
+	}
+
+	case ENC_MAP_ATOM_KEY: {
+	    // Encode an object key that is an atom.
+	    Atom *a;
+	    Sint strlen;
+	  enc_map_atom_key:
+	    a = atom_tab(atom_val(obj));
+	    ENSURE_BUFFER(a->len * MAX_UTF8_EXPANSION + 2);
+	    *ep++ = '"';
+	    strlen = json_enc_unicode(ep, a->name, a->name + a->len);
+	    if (strlen < 0) { goto fail; }
+	    ep += strlen;
+	    *ep++ = '"';
+	    obj = THE_NON_VALUE;
+	    goto outer_loop;
 	}
 
 	case ENC_MAP_VALUE:
@@ -507,7 +538,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		ep += strlen;
 
 		obj = THE_NON_VALUE;
-		reds = 0; /* yield */
+		reds = 0; // Yield.
 		break;
 	    } else {
 		ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 1);
@@ -546,12 +577,12 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 
 	case ATOM_DEF:
 	    if      (obj == am_true) {
-		ENSURE_BUFFER(4); *ep++ = 't'; *ep++ = 'r'; *ep++ = 'u'; *ep++ = 'e'; }
+		ENSURE_BUFFER(4); ep[0] = 't'; ep[1] = 'r'; ep[2] = 'u'; ep[3] = 'e'; ep += 4; }
 	    else if (obj == am_false) {
-		ENSURE_BUFFER(5); *ep++ = 'f'; *ep++ = 'a'; *ep++ = 'l'; *ep++ = 's'; *ep++ = 'e'; }
+		ENSURE_BUFFER(5); ep[0] = 'f'; ep[1] = 'a'; ep[2] = 'l'; ep[3] = 's'; ep[4] = 'e'; ep += 5; }
 	    else if (obj == am_null) {
 	    // else if (ERTS_IS_ATOM_STR("null", obj)) {
-		ENSURE_BUFFER(4); *ep++ = 'n'; *ep++ = 'u'; *ep++ = 'l'; *ep++ = 'l'; }
+		ENSURE_BUFFER(4); ep[0] = 'n'; ep[1] = 'u'; ep[2] = 'l'; ep[3] = 'l'; ep += 4; }
 	    else { goto fail; }
 	    break;
 
@@ -658,10 +689,11 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    ep += sprintf((char *) ep, "%.15g", f.fd);
 	    // Ensure that a double always contains a decimal point.
 	    while (epp < ep) {
-		if (*epp++ == '.') { goto period_found; }
+		const byte c = *epp++;
+		if (c == '.' || c == 'e') { goto no_period_needed; }
 	    }
 	    *ep++ = '.'; *ep++ = '0';
-	    period_found:
+	  no_period_needed:
 	    break;
 	}
 
@@ -797,7 +829,7 @@ u64ToAsciiTable( char *dst, u_int64_t value)
     u_int32_t const length = digits10(value);
     u_int32_t next = length - 1;
     while (value >= 100) {
-	auto const int i = (value % 100) * 2;
+	const int i = (value % 100) * 2;
 	value /= 100;
 	dst[next] = digits[i + 1];
 	dst[next - 1] = digits[i];
@@ -807,7 +839,7 @@ u64ToAsciiTable( char *dst, u_int64_t value)
     if (value < 10) {
 	dst[next] = '0' + (u_int32_t) value;
     } else {
-	auto const int i = (u_int32_t) value * 2;
+	const int i = (u_int32_t) value * 2;
 	dst[next] = digits[i + 1];
 	dst[next - 1] = digits[i];
     }
