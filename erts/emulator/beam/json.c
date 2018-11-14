@@ -320,7 +320,8 @@ erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
 #define ENC_MAP_ATOM_KEY	((Eterm) 5)
 #define ENC_MAP_VALUE		((Eterm) 6) // Flags value for object encoding.
 #define ENC_MAP_LAST		((Eterm) 7) // Flags end of object encoding.
-#define ENC_BIN_COPY		((Eterm) 8)
+#define ENC_BIN_COPY		((Eterm) 8) // Copy long binary.
+#define ENC_JSON_COPY		((Eterm) 9) // Copy preencoded JSON.
 
 // Max number of output bytes one Unicode character can expand to: \uXXXX.
 #define MAX_UTF8_EXPANSION 6
@@ -438,7 +439,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
                 if (obj == am_json) {
                     WSTACK_PUSH2(s, ENC_OBJECT_ELEMENT, tail);
                     obj = tuple[2];
-                    goto enc_preencoded_json;
+                    goto enc_json_start;
                 } else {
                     WSTACK_PUSH4(s, ENC_OBJECT_ELEMENT, tail, ENC_MAP_VALUE, tuple[2]);
                     // Encode object key.
@@ -469,7 +470,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
             }
             if (obj == am_json) {
                 obj = *vptr;
-                goto enc_preencoded_json;
+                goto enc_json_start;
             } else {
                 WSTACK_PUSH2(s, ENC_MAP_VALUE, *vptr);
                 // Encode object key.
@@ -492,7 +493,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
                 }
                 if (obj == am_json) {
                     obj = CDR(cons);
-                    goto enc_preencoded_json;
+                    goto enc_json_start;
                 } else {
                     WSTACK_PUSH2(s, ENC_MAP_VALUE, CDR(cons));
                     // Encode object key.
@@ -540,6 +541,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
             Sint strlen;
             if (len > reds * TERM_TO_JSON_MEMCPY_FACTOR) {
                 Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
+                // Move n forward to the end of the multi-byte UTF-8 character.
                 while (IS_UTF8_CONTINUATION_BYTE(bytes[n]) && n < len) { n++; }
                 WSTACK_PUSH4(s, (UWord) (bytes + n), (UWord) aligned_alloc, ENC_BIN_COPY, len - n);
 
@@ -555,7 +557,6 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 
                 obj = THE_NON_VALUE;
                 reds = 0; // Yield.
-                break;
             } else {
                 ENSURE_BUFFER(MAX_UTF8_EXPANSION * len + 1);
                 strlen = json_enc_unicode(ep, bytes, bytes + len);
@@ -568,6 +569,42 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
                 reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
                 goto outer_loop;
             }
+            break;
+        }
+
+        case ENC_JSON_COPY: {
+            Uint len = (Uint) obj;
+            byte *bytes = (byte *) WSTACK_POP(s);
+            if (0) {
+                Uint bitoffs;
+                Uint bitsize;
+            enc_json_start:
+                if (tag_val_def(obj) != BINARY_DEF) { goto fail; }
+                ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
+                if (bitsize != 0) { goto fail; }
+                if (bitoffs % 8 != 0) { goto fail; }
+                bytes += bitoffs / 8;
+                len = binary_size(obj);
+            }
+
+            if (ctx != NULL && len > reds * TERM_TO_JSON_MEMCPY_FACTOR) {
+                // Copy partial binary.
+                Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
+                WSTACK_PUSH3(s, (UWord) (bytes + n), ENC_JSON_COPY, len - n);
+                ENSURE_BUFFER(n);
+                sys_memcpy(ep, bytes, n);
+                ep += n;
+                obj = THE_NON_VALUE;
+                reds = 0; // Yield.
+            } else {
+                // Copy remaining.
+                ENSURE_BUFFER(len);
+                sys_memcpy(ep, bytes, len);
+                ep += len;
+                reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
+                goto outer_loop;
+            }
+            break;
         }
 
         default:
@@ -651,24 +688,11 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
                     goto enc_object_element;
                 }
                 goto fail;
-            case 2: {
-                byte *bytes;
-                Uint bitoffs;
-                Uint bitsize;
-                Uint len;
+            case 2:
+                // A two-element tuple whose first element is 'json' is preencoded JSON.
                 if (tuple[1] != am_json) { goto fail; };
                 obj = tuple[2];
-              enc_preencoded_json:
-                if (tag_val_def(obj) != BINARY_DEF) { goto fail; }
-                ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
-                len = binary_size(obj);
-                if (bitsize != 0) { goto fail; }
-                if (bitoffs % 8 != 0) { goto fail; }
-                copy_binary_to_buffer(ep, 0, bytes, bitoffs, 8 * len);
-                ep += len;
-                reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
-                goto outer_loop;
-            }
+                goto enc_json_start;
             }
             goto fail;
         }
