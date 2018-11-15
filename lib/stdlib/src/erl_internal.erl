@@ -389,6 +389,7 @@ bif(split_binary, 2) -> true;
 bif(statistics, 1) -> true;
 bif(term_to_binary, 1) -> true;
 bif(term_to_binary, 2) -> true;
+bif(term_to_json, 1) -> true;
 bif(throw, 1) -> true;
 bif(time, 0) -> true;
 bif(tl, 1) -> true;
