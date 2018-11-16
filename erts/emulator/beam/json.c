@@ -255,7 +255,7 @@ erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
 	if (context_b == NULL) {
 	    context_b = erts_create_magic_binary(sizeof (TTBContext), t2j_context_destructor);
 	    context = ERTS_MAGIC_BIN_DATA(context_b);
-	    memcpy(context, &context_buf, sizeof (TTBContext));
+	    sys_memcpy(context, &context_buf, sizeof (TTBContext));
 	}
 	if (is_first_call) {
 	    erts_set_gc_state(p, 0);
@@ -285,28 +285,18 @@ erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
     case JSON_DONE: {
 	// Finished; create return value.
 	Binary *result_bin = context->result_bin;
-	size_t real_size = result_bin->orig_size;
-	ProcBin* pb;
 
 	BUMP_REDS(p, (initial_reds - reds) / TERM_TO_JSON_LOOP_FACTOR);
 	context->result_bin = NULL;
 	context->alive = 0;
-	pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
-	pb->thing_word = HEADER_PROC_BIN;
-	pb->size = real_size;
-	pb->next = MSO(p).first;
-	MSO(p).first = (struct erl_off_heap_header *) pb;
-	pb->val = result_bin;
-	pb->bytes = (byte *) result_bin->orig_bytes;
-	pb->flags = 0;
-	OH_OVERHEAD(&(MSO(p)), pb->size / sizeof (Eterm));
+	ASSERT(erts_refc_read(&result_bin->intern.refc, 1));
 	if (context_b && erts_refc_read(&context_b->intern.refc, 0) == 0) {
 	    erts_bin_free(context_b);
 	}
 	if (! is_first_call) {
 	    erts_set_gc_state(p, 1);
 	}
-	BIF_RET(make_binary(pb));
+	BIF_RET(erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin));
     }
     }
     abort();
@@ -378,7 +368,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
     } while (0)
 
 
-    goto encode_term;
+    goto encode_term_no_reduction_check;
 
  outer_loop:
     while (! WSTACK_ISEMPTY(s)) {
@@ -437,6 +427,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		if (tuple_len != 2) { goto fail; }
 		obj = tuple[1];
 		if (obj == am_json) {
+		    // Preencoded JSON.
 		    WSTACK_PUSH2(s, ENC_OBJECT_ELEMENT, tail);
 		    obj = tuple[2];
 		    goto enc_json_start;
@@ -469,6 +460,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		WSTACK_PUSH2(s, ENC_MAP_LAST, THE_NON_VALUE);
 	    }
 	    if (obj == am_json) {
+		// Preencoded JSON.
 		obj = *vptr;
 		goto enc_json_start;
 	    } else {
@@ -492,6 +484,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		    *ep++ = ',';
 		}
 		if (obj == am_json) {
+		    // Preencoded JSON.
 		    obj = CDR(cons);
 		    goto enc_json_start;
 		} else {
@@ -509,6 +502,8 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 
 	case ENC_MAP_ATOM_KEY: {
 	    // Encode an object key that is an atom.
+	    // This case key is never matched; it exists to hold the common
+	    // code for converting an atom to a binary.
 	    Atom *a;
 	    Sint strlen;
 	  enc_map_atom_key:
@@ -621,7 +616,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	}
 
 	// obj contains the next thing to encode.
-
+    encode_term_no_reduction_check:
 	switch (tag_val_def(obj)) {
 	case NIL_DEF:
 	    ENSURE_BUFFER(2);
