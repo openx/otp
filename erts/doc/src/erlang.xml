@@ -8966,6 +8966,22 @@ hello
     </func>
 
     <func>
+      <name name="term_to_json" arity="1"/>
+      <fsummary>Encode a term to a JSON-encoded binary.
+      </fsummary>
+      <desc>
+        <p>Returns a binary that contains the a JSON representation of the
+        data in <c><anno>JsonData</anno></c>.</p>
+      </desc>
+      <pre>
+> <input>erlang:term_to_json([1, 2.0, &lt;&lt;"three">>]).</input>
+&lt;&lt;"[1,2.0,\"three\"]"&gt;&gt;
+> <input>erlang:term_to_json({[{&lt;&lt;"name">>, &lt;&lt;"richard">>}, {&lt;&lt;"age">>, 7},
+      {&lt;&lt;"friends">>, [&lt;&lt;"alice">>, &lt;&lt;"jane">>]}]}).</input>
+&lt;&lt;"{\"name\":\"richard\",\"age\":7,\"friends\":[\"alice\",\"jane\"]}">></pre>
+    </func>
+
+    <func>
       <name name="throw" arity="1"/>
       <fsummary>Throw an exception.</fsummary>
       <desc>
