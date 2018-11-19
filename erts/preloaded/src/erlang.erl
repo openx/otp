@@ -2468,6 +2468,12 @@ term_to_binary(_Term, _Options) ->
 term_to_json(_Term) ->
     erlang:nif_error(undefined).
 
+-spec term_to_json(Term, Options) -> json_binary() when
+    Term :: term(),
+    Options :: [{min_buf_size, pos_integer()}].
+term_to_json(_Term, _Options) ->
+    erlang:nif_error(undefined).
+
 %% Shadowed by erl_bif_types: erlang:tl/1
 -spec tl(List) -> term() when
       List :: [term(), ...].
