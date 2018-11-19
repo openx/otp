@@ -118,6 +118,7 @@ is_pure(erlang, size, 1) -> true;
 is_pure(erlang, split_binary, 2) -> true;
 is_pure(erlang, term_to_binary, 1) -> true;
 is_pure(erlang, term_to_json, 1) -> true;
+is_pure(erlang, term_to_json, 2) -> true;
 is_pure(erlang, tl, 1) -> true;
 is_pure(erlang, trunc, 1) -> true;
 is_pure(erlang, tuple_size, 1) -> true;
