@@ -60,6 +60,12 @@
       </desc>
     </datatype>
     <datatype>
+      <name>json_binary()</name>
+      <desc>
+        <p>A binary containing JSON-encoded data.</p>
+      </desc>
+    </datatype>
+    <datatype>
       <name>iovec()</name>
       <desc>
         <p>A list of binaries. This datatype is useful to use
@@ -8967,11 +8973,10 @@ hello
 
     <func>
       <name name="term_to_json" arity="1"/>
-      <fsummary>Encode a term to a JSON-encoded binary.
-      </fsummary>
+      <fsummary>Encode a term to a JSON-encoded binary.</fsummary>
       <desc>
         <p>Returns a binary that contains the a JSON representation of the
-        data in <c><anno>JsonData</anno></c>.</p>
+        data in <c><anno>Term</anno></c>.</p>
       </desc>
       <pre>
 > <input>erlang:term_to_json([1, 2.0, &lt;&lt;"three">>]).</input>
