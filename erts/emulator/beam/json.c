@@ -60,12 +60,12 @@ typedef struct T2JContext_struct {
 
 static Export term_to_json_trap_export;
 
-// static byte* enc_json(Eterm, byte*, Uint32 flags);
-static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
-
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
+static BIF_RETTYPE term_to_json_trap_2(BIF_ALIST_2);
 
-static Eterm erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b);
+static Eterm erts_term_to_json_int(Process* p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b);
+
+static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
 
 unsigned i64ToAsciiTable(char *dst, int64_t value);
 Sint json_enc_unicode(byte *d, byte *s, byte *send);
@@ -75,12 +75,26 @@ void erts_init_json(void) {
     erts_init_trap_export(&term_to_json_trap_export,
                           am_erts_internal, am_term_to_json_trap, 1,
                           &term_to_json_trap_1);
+
+    erts_init_trap_export(&term_to_json_trap_export,
+                          am_erts_internal, am_term_to_json_trap, 2,
+                          &term_to_json_trap_1);
 }
+
+/* Define EXTREME_TTB_TRAPPING for testing in dist.h */
+#ifndef EXTREME_TTB_TRAPPING
+#define TERM_TO_JSON_DEFAULT_INITIAL_SIZE 4096
+#else
+#define TERM_TO_JSON_DEFAULT_INITIAL_SIZE 20
+#endif
+#define TERM_TO_JSON_MAX_INITIAL_SIZE (20 * 1024 * 1024)
+
+#define JSON_USE_NIL	0x1
 
 /**********************************************************************/
 
-/* This function will be called to continue work when term_to_json_1 returns
-   via BIF_TRAP1. */
+/* Continue work after either term_to_json_1 or term_to_json_2 return via
+   BIF_TRAP1. */
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
 {
     Eterm *tp = tuple_val(BIF_ARG_1);
@@ -88,7 +102,7 @@ static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
     Eterm bt = tp[2];
     Binary *context = erts_magic_ref2bin(bt);
 
-    return erts_term_to_json_int(BIF_P, Term, /* TERM_TO_JSON_DFLAGS */ 0, context);
+    return erts_term_to_json_int(BIF_P, Term, 0, 0, context);
 }
 
 HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 1)
@@ -96,10 +110,9 @@ HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 1)
 /* erlang:term_to_json/1 entry point. */
 BIF_RETTYPE term_to_json_1(BIF_ALIST_1)
 {
-    return erts_term_to_json_int(BIF_P, BIF_ARG_1, /* TERM_TO_JSON_DFLAGS */ 0, /* context */ NULL);
+    return erts_term_to_json_int(BIF_P, BIF_ARG_1, TERM_TO_JSON_DEFAULT_INITIAL_SIZE, 0,  NULL);
 }
 
-#if 0
 HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 2)
 
 /* erlang:term_to_json/2 entry point. */
@@ -107,90 +120,37 @@ BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 {
     Process* p = BIF_P;
     Eterm Term = BIF_ARG_1;
-    Eterm Flags = BIF_ARG_2;
+    Eterm Options = BIF_ARG_2;
+    Sint buf_size = TERM_TO_JSON_DEFAULT_INITIAL_SIZE;
     Uint flags = 0; // TERM_TO_JSON_DFLAGS;
-    Eterm res;
 
-    while (is_list(Flags)) {
-        Eterm arg = CAR(list_val(Flags));
+    while (is_list(Options)) {
+        Eterm arg = CAR(list_val(Options));
         Eterm* tp;
         if (is_tuple(arg) && *(tp = tuple_val(arg)) == make_arityval(2)) {
-            if (tp[1] == am_minor_version && is_small(tp[2])) {
-                switch (signed_val(tp[2])) {
-                case 0:
-                    flags = TERM_TO_JSON_DFLAGS & ~DFLAG_NEW_FLOATS;
-                    break;
-                case 1: /* Current default... */
-                    flags = TERM_TO_JSON_DFLAGS;
-                    break;
-                case 2:
-                    flags = TERM_TO_JSON_DFLAGS | DFLAG_UTF8_ATOMS;
-                    break;
-                default:
-                    goto error;
+            if (ERTS_IS_ATOM_STR("min_buf_size", tp[1]) && tag_val_def(tp[2]) == SMALL_DEF) {
+                buf_size = signed_val(tp[2]);
+                if (buf_size < 1) { goto error; }
+                if (buf_size > TERM_TO_JSON_MAX_INITIAL_SIZE) {
+                    buf_size = TERM_TO_JSON_MAX_INITIAL_SIZE;
                 }
             } else {
                 goto error;
             }
+        } else if (ERTS_IS_ATOM_STR("use_nil", arg)) {
+            flags |= JSON_USE_NIL;
         } else {
         error:
             BIF_ERROR(p, BADARG);
         }
-        Flags = CDR(list_val(Flags));
+        Options = CDR(list_val(Options));
     }
-    if (is_not_nil(Flags)) {
+    if (is_not_nil(Options)) {
         goto error;
     }
 
-    res = erts_term_to_json_int(p, Term, flags, NULL);
-    if (is_tuple(res)) {
-        erts_set_gc_state(p, 0);
-        BIF_TRAP1(&term_to_json_trap_export,BIF_P,res);
-    } else {
-        ASSERT(!(BIF_P->flags & F_DISABLE_GC));
-        BIF_RET(res);
-    }
+    return erts_term_to_json_int(p, Term, buf_size, flags, NULL);
 }
-#endif
-
-#if 0
-static Eterm
-erts_term_to_json_simple(Process* p, Eterm Term, Uint size, Uint flags)
-{
-    Eterm bin;
-    size_t real_size;
-    byte* endp;
-    byte* bytes;
-
-    bin = new_binary(p, (byte *)NULL, size);
-    bytes = binary_bytes(bin);
-    endp = enc_json(Term, bytes, flags);
-    if (endp == NULL) {
-        erts_exit(ERTS_ERROR_EXIT, "%s, line %d: bad term: %x\n",
-                  __FILE__, __LINE__, Term);
-    }
-    real_size = endp - bytes;
-    if (real_size > size) {
-        erts_exit(ERTS_ERROR_EXIT, "%s, line %d: buffer overflow: %d word(s)\n",
-                  __FILE__, __LINE__, endp - (bytes + size));
-    }
-    return erts_realloc_binary(bin, real_size);
-}
-
-Eterm
-erts_term_to_json(Process* p, Eterm Term, Uint flags) {
-    Uint size;
-    size = encode_size_struct2(NULL, Term, flags) + 1 /* VERSION_MAGIC */;
-    return erts_term_to_json_simple(p, Term, size, flags);
-}
-#endif
-
-/* Define EXTREME_TTB_TRAPPING for testing in dist.h */
-#ifndef EXTREME_TTB_TRAPPING
-#define TERM_TO_JSON_INITIAL_SIZE 4096
-#else
-#define TERM_TO_JSON_INITIAL_SIZE 20
-#endif
 
 #define TERM_TO_JSON_LOOP_FACTOR TERM_TO_BINARY_LOOP_FACTOR
 #define TERM_TO_JSON_MEMCPY_FACTOR 8
@@ -215,7 +175,7 @@ static int t2j_context_destructor(Binary *context_bin)
 #define JSON_DONE	2
 
 static BIF_RETTYPE
-erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
+erts_term_to_json_int(Process* p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b)
 {
 #ifndef EXTREME_TTB_TRAPPING
     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
@@ -236,7 +196,7 @@ erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
         context_buf.ep = NULL;
         context_buf.obj = THE_NON_VALUE;
         context_buf.wstack.wstart = NULL;
-        context_buf.result_bin = erts_bin_nrml_alloc(TERM_TO_JSON_INITIAL_SIZE);
+        context_buf.result_bin = erts_bin_nrml_alloc(initial_buf_size);
         context = &context_buf;
     } else {
         is_first_call = 0;
@@ -268,6 +228,7 @@ erts_term_to_json_int(Process* p, Eterm Term, Uint flags, Binary *context_b)
     }
 
     case JSON_BADARG:
+        // Found some bad input data; return a badarg error.
         ASSERT(erts_refc_read(&context->result_bin->intern.refc, 1) == 1);
         erts_bin_free(context->result_bin);
         if (context_b && erts_refc_read(&context_b->intern.refc, 0) == 0) {
@@ -632,9 +593,13 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
                 ENSURE_BUFFER(5); ep[0] = 'f'; ep[1] = 'a'; ep[2] = 'l'; ep[3] = 's'; ep[4] = 'e'; ep += 5;
                 break;
             case am_null:
+              encode_null:
                 ENSURE_BUFFER(4); ep[0] = 'n'; ep[1] = 'u'; ep[2] = 'l'; ep[3] = 'l'; ep += 4;
                 break;
             default:
+                if (dflags & JSON_USE_NIL && ERTS_IS_ATOM_STR("nil", obj)) {
+                    goto encode_null;
+                }
                 goto fail;
             }
             break;

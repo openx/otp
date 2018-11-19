@@ -6,7 +6,7 @@
          basic_types/1, integers/1, lists/1,
          objects_proplist/1, objects_flatmap/1, objects_hamt/1, objects_atomkey/1,
          unicode/1, binaries/1, bigints/1,
-         preencoded/1, errors/1]).
+         preencoded/1, use_nil/1, bufsize/1, errors/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -16,7 +16,7 @@ suite() -> [{ct_hooks,[ts_install_cth]},
 all() ->
     [basic_types, integers, lists,
      objects_proplist, objects_flatmap, objects_hamt, objects_atomkey,
-     unicode, binaries, bigints, preencoded, errors].
+     unicode, binaries, bigints, preencoded, use_nil, bufsize, errors].
 
 groups() ->
     [].
@@ -234,10 +234,28 @@ preencoded(Config) when is_list(Config) ->
     <<"{\"a\":1,\"b\":2}">> = erlang:term_to_json({[{json, <<"\"a\":1">>}, {<<"b">>, 2}]}),
     <<"{\"a\":1,\"b\":2}">> = erlang:term_to_json({[{<<"a">>, 1}, {json, <<"\"b\":2">>}]}),
     <<"{test}">> = erlang:term_to_json(#{json => <<"test">>}),
-    LongBinary = list_to_binary([$", lists:duplicate(1000, <<"0123456789">>), $"]),
+    LongBinary = list_to_binary([$\", lists:duplicate(1000, <<"0123456789">>), $\"]),
     LongBinaryExpect = <<$[, LongBinary/binary, $]>>,
     LongBinaryActual = erlang:term_to_json([{json, LongBinary}]),
     ?assertEqual(LongBinaryExpect, LongBinaryActual),
+    ok.
+
+use_nil(Config) when is_list(Config) ->
+    <<"null">> = erlang:term_to_json(nil, [ use_nil ]),
+    <<"{\"obj\":null}">> = erlang:term_to_json({[ {<<"obj">>, nil} ]}, [ use_nil ]),
+    <<"{\"obj\":null}">> = erlang:term_to_json(#{<<"obj">> => nil}, [ use_nil ]),
+    <<"[null]">> = erlang:term_to_json([ nil ], [ use_nil ]),
+    ok.
+
+bufsize(Config) when is_list(Config) ->
+    LongBinary = list_to_binary([$\", lists:duplicate(1000, <<"0123456789">>), $\"]),
+    IntList = lists:seq(1, 100),
+    IntListJson = list_to_binary([ $[, lists:join($,, [ integer_to_binary(N) || N <- IntList ]), $] ]),
+    lists:foreach(
+      fun(N) ->
+              LongBinary = erlang:term_to_json({json, LongBinary}, [ {min_buf_size, N} ]),
+              IntListJson = erlang:term_to_json(IntList,  [ {min_buf_size, N} ])
+      end, lists:seq(1, 127, 2)),
     ok.
 
 errors(Config) when is_list(Config) ->
