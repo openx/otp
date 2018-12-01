@@ -6,7 +6,9 @@
          basic_types/1, integers/1, lists/1,
          objects_proplist/1, objects_flatmap/1, objects_hamt/1, objects_atomkey/1,
          unicode/1, binaries/1, bigints/1,
-         preencoded/1, use_nil/1, bufsize/1, errors/1]).
+         preencoded/1, use_nil/1, bufsize/1, errors/1,
+         j2t_basic_types/1, j2t_integers/1, j2t_floats/1,
+         j2t_lists/1, j2t_objects_proplist/1, j2t_unicode/1, j2t_errors/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -16,7 +18,9 @@ suite() -> [{ct_hooks,[ts_install_cth]},
 all() ->
     [basic_types, integers, lists,
      objects_proplist, objects_flatmap, objects_hamt, objects_atomkey,
-     unicode, binaries, bigints, preencoded, use_nil, bufsize, errors].
+     unicode, binaries, bigints, preencoded, use_nil, bufsize, errors,
+     j2t_basic_types, j2t_integers, j2t_floats,
+     j2t_lists, j2t_objects_proplist, j2t_unicode, j2t_errors].
 
 groups() ->
     [].
@@ -271,3 +275,178 @@ encode_to_binary(B) when is_binary(B)  -> [ $", B, $" ].
 
 encode_natural(I) when is_integer(I) -> integer_to_binary(I);
 encode_natural(B) when is_binary(B) -> [ $", B, $" ].
+
+j2t_basic_types(Config) when is_list(Config) ->
+    true = erlang:json_to_term(<<"true">>),
+    false = erlang:json_to_term(<<"false">>),
+    null = erlang:json_to_term(<<"null">>),
+    1 = erlang:json_to_term(<<"1">>),
+    1.1 = erlang:json_to_term(<<"1.1">>),
+    <<"apple">> = erlang:json_to_term(<<"\"apple\"">>),
+    %% Whitespace skipping.
+    true = erlang:json_to_term(<<" true ">>),
+    false = erlang:json_to_term(<<" false ">>),
+    null = erlang:json_to_term(<<" null ">>),
+    %% Bad values.
+    ?assertError(badarg, erlang:json_to_term("nul")),
+    ?assertError(badarg, erlang:json_to_term("nulll")),
+    ?assertError(badarg, erlang:json_to_term("tru")),
+    ?assertError(badarg, erlang:json_to_term("truex")),
+    ?assertError(badarg, erlang:json_to_term("fals")),
+    ?assertError(badarg, erlang:json_to_term("falsex")),
+    ok.
+
+j2t_integers(Config) when is_list(Config) ->
+    0 = erlang:json_to_term(<<"0">>),
+    1 = erlang:json_to_term(<<"1">>),
+    -1 = erlang:json_to_term(<<"-1">>),
+    9 = erlang:json_to_term(<<"9">>),
+    10 = erlang:json_to_term(<<"10">>),
+    99 = erlang:json_to_term(<<"99">>),
+    -100 = erlang:json_to_term(<<"-100">>),
+    1234 = erlang:json_to_term(<<"1234">>),
+    4321 = erlang:json_to_term(<<"4321">>),
+    5678 = erlang:json_to_term(<<"5678">>),
+    8765 = erlang:json_to_term(<<"8765">>),
+    9999 = erlang:json_to_term(<<"9999">>),
+    10000 = erlang:json_to_term(<<"10000">>),
+    100000 = erlang:json_to_term(<<"100000">>),
+    1000000 = erlang:json_to_term(<<"1000000">>),
+    10000000 = erlang:json_to_term(<<"10000000">>),
+    100000000 = erlang:json_to_term(<<"100000000">>),
+    1000000000 = erlang:json_to_term(<<"1000000000">>),
+    1234567890 = erlang:json_to_term(<<"1234567890">>),
+    2147483647 = erlang:json_to_term(<<"2147483647">>),
+    2147483648 = erlang:json_to_term(<<"2147483648">>),
+    -2147483647 = erlang:json_to_term(<<"-2147483647">>),
+    -2147483648 = erlang:json_to_term(<<"-2147483648">>),
+    -2147483649 = erlang:json_to_term(<<"-2147483649">>),
+    576460752303423487 = erlang:json_to_term(<<"576460752303423487">>), % 2^59 - 1.
+    -576460752303423488 = erlang:json_to_term(<<"-576460752303423488">>), % - 2^59.
+    0 = erlang:json_to_term(<<"-0">>),
+    %% whitespace skipping
+    1 = erlang:json_to_term(<<" 1 ">>),
+    %% bad whitespace
+    ?assertError(badarg, erlang:json_to_term(<<"1 2">>)),
+    %% illegal integers
+    ?assertError(badarg, erlang:json_to_term(<<"01">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"--1">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"1-">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"1-1">>)),
+    ok.
+
+j2t_floats(Config) when is_list(Config) ->
+    0.0 = erlang:json_to_term(<<"0.0">>),
+    1.0 = erlang:json_to_term(<<"1.0">>),
+    1.0 = erlang:json_to_term(<<"1e0">>),
+    10.0 = erlang:json_to_term(<<"10e0">>),
+    10.0 = erlang:json_to_term(<<"1e1">>),
+    0.1 = erlang:json_to_term(<<"1e-1">>),
+    1.1 = erlang:json_to_term(<<"11e-1">>),
+    11.0 = erlang:json_to_term(<<"1.1e1">>),
+    0.5 = erlang:json_to_term(<<"5.0e-1">>),
+    1.0e10 = erlang:json_to_term(<<"1e10">>),
+    ?assertError(badarg, erlang:json_to_term(<<"0.">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"5.">>)),
+    ?assertError(badarg, erlang:json_to_term(<<".5">>)),
+    ?assertError(badarg, erlang:json_to_term(<<".5e1">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"5.e1">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"1.2.3">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"1e1e1">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"1e1.4">>)),
+    ok.
+
+j2t_lists(Config) when is_list(Config) ->
+    [] = erlang:json_to_term(<<"[]">>),
+    [true] = erlang:json_to_term(<<"[true]">>),
+    [1] = erlang:json_to_term(<<"[1]">>),
+    [0.5] = erlang:json_to_term(<<"[0.5]">>),
+    [1, 2] = erlang:json_to_term(<<"[1,2]">>),
+    [1, 2, 3] = erlang:json_to_term(<<"[1,2,3]">>),
+    [true, 2, <<"three">>] = erlang:json_to_term(<<"[true,2,\"three\"]">>),
+    [1, 2, [3, 4, 5], 6, [[7]], [8, [9, [10], 11, 12]]] =
+        erlang:json_to_term(<<"[1,2,[3,4,5],6,[[7]],[8,[9,[10],11,12]]]">>),
+    %% whitespace skipping
+    [] = erlang:json_to_term(<<" [ ] ">>),
+    [1] = erlang:json_to_term(<<" [ 1 ] ">>),
+    [1, 2] = erlang:json_to_term(<<" [ 1 , 2 ] ">>),
+    ok.
+
+j2t_objects_proplist(Config) when is_list(Config) ->
+    {[]} = erlang:json_to_term(<<"{}">>),
+    {[{<<"one">>, 1}]} = erlang:json_to_term(<<"{\"one\":1}">>),
+    {[{<<"one">>, 1}, {<<"two">>, 2}]} = erlang:json_to_term(<<"{\"one\":1,\"two\":2}">>),
+    {[{<<"one">>, 1}, {<<"two">>, 2}, {<<"three">>, 3}]} = erlang:json_to_term(<<"{\"one\":1,\"two\":2,\"three\":3}">>),
+    {[{<<"empty">>, []}]} = erlang:json_to_term(<<"{\"empty\":[]}">>),
+    {[{<<"list">>, [1, 2, 3]}]} = erlang:json_to_term(<<"{\"list\":[1,2,3]}">>),
+    {[{<<"empty">>, {[]}}]} = erlang:json_to_term(<<"{\"empty\":{}}">>),
+    {[{<<"object">>, {[{<<"1">>,<<"one">>}]}}]} = erlang:json_to_term(<<"{\"object\":{\"1\":\"one\"}}">>),
+    %% whitespace skipping.
+    {[]} = erlang:json_to_term(<<" { } ">>),
+    {[{<<"a">>, 1}]} = erlang:json_to_term(<<" { \"a\" : 1 } ">>),
+    {[{<<"a">>, 1}, {<<"b">>, 2}]} = erlang:json_to_term(<<" { \"a\" : 1 , \"b\" : 2 } ">>),
+    ok.
+
+j2t_unicode(Config) when is_list(Config) ->
+    <<0>> = erlang:json_to_term(<<"\"\\u0000\"">>),
+    <<"\b">> = erlang:json_to_term(<<"\"\\b\"">>),
+    <<"\n">> = erlang:json_to_term(<<"\"\\n\"">>),
+    <<"\r">> = erlang:json_to_term(<<"\"\\r\"">>),
+    <<"\t">> = erlang:json_to_term(<<"\"\\t\"">>),
+    <<"\"">> = erlang:json_to_term(<<"\"\\\"\"">>),
+    <<"\\">> = erlang:json_to_term(<<"\"\\\\\"">>),
+    <<"/">> = erlang:json_to_term(<<"\"\\/\"">>),
+    [ 16#1, 16#7F, 16#80, 16#FD, 16#7FF, 16#800, 16#FFFF ] =
+        unicode:characters_to_list(erlang:json_to_term(<<"\"\\u0001\\u007f\\u0080\\u00FD\\u07FF\\u0800\\uFffF\"">>), utf8),
+    [ 16#3210, 16#7654, 16#BA98, 16#FEDC, 16#ABCD, 16#00EF ] =
+        unicode:characters_to_list(erlang:json_to_term(<<"\"\\u3210\\u7654\\uba98\\ufedc\\uABCD\\u00EF\"">>), utf8),
+
+    %% two-byte utf8
+    [ 16#80, 16#7FF ] =
+        unicode:characters_to_list(erlang:json_to_term(<<$",
+                                                         16#C2, 16#80,
+                                                         16#DF, 16#BF,
+                                                         $">>)),
+    %% three-byte utf8
+    [ 16#800, 16#2640, 16#FFFF ] =
+        unicode:characters_to_list(erlang:json_to_term(<<$",
+                                                         16#E0, 16#A0, 16#80,
+                                                         16#E2, 16#99, 16#80,
+                                                         16#EF, 16#BF, 16#BF,
+                                                         $">>)),
+    %% four-byte utf8
+    [ 16#10000, 16#10FFFF ] =
+        unicode:characters_to_list(erlang:json_to_term(<<$",
+                                                         16#F0, 16#90, 16#80, 16#80,
+                                                         16#F4, 16#8F, 16#BF, 16#BF,
+                                                         $">>)),
+    %% bad utf-8
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#80, $">>)),
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#BF, $">>)),
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#C0, $">>)),
+    %% ?assertError(badarg, erlang:json_to_term(<<34, 16#C1, 16#81, 34>>)), % long encoding for "A"
+    <<16#C1, 16#81>> = erlang:json_to_term(<<34, 16#C1, 16#81, 34>>), % long encoding for "A" should be rejected
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#C2, $">>)), % missing continuation byte
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#C2, 16#7F, $">>)), % bad continuation byte
+    ok.
+
+j2t_errors(Config) when is_list(Config) ->
+    ?assertError(badarg, erlang:json_to_term(<<"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"stuff">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"[">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"]">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{]">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"[}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"[{]">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{[}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"[0,]">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{\"k\":1,}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{0:1}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{true:1}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{false:1}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"{null:1}">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"hello">>)),
+    ok.

@@ -101,6 +101,8 @@ is_pure(erlang, is_record, 2) -> true;
 is_pure(erlang, is_record, 3) -> true;
 is_pure(erlang, is_reference, 1) -> true;
 is_pure(erlang, is_tuple, 1) -> true;
+is_pure(erlang, json_to_term, 1) -> true;
+is_pure(erlang, json_to_term, 2) -> true;
 is_pure(erlang, length, 1) -> true;
 is_pure(erlang, list_to_atom, 1) -> true;
 is_pure(erlang, list_to_binary, 1) -> true;
