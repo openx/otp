@@ -8987,6 +8987,18 @@ hello
     </func>
 
     <func>
+      <name name="term_to_json" arity="2"/>
+      <fsummary>Encode a term to a JSON-encoded binary.</fsummary>
+      <desc>
+        <p>Returns a binary that contains the a JSON representation of the
+        data in <c><anno>Term</anno></c>.</p>
+      </desc>
+      <pre>
+> <input>erlang:term_to_json([1, nil, 3], [use_nil]).</input>
+&lt;&lt;"[1,null,3]"&gt;&gt;</pre>
+    </func>
+
+    <func>
       <name name="throw" arity="1"/>
       <fsummary>Throw an exception.</fsummary>
       <desc>

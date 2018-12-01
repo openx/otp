@@ -61,7 +61,6 @@ typedef struct T2JContext_struct {
 static Export term_to_json_trap_export;
 
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
-static BIF_RETTYPE term_to_json_trap_2(BIF_ALIST_2);
 
 static Eterm erts_term_to_json_int(Process* p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b);
 
