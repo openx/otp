@@ -2470,7 +2470,8 @@ term_to_json(_Term) ->
 
 -spec term_to_json(Term, Options) -> json_binary() when
       Term :: term(),
-      Options :: [{min_buf_size, pos_integer()}].
+      Options :: [{min_buf_size, pos_integer()} |
+                  use_nil ].
 term_to_json(_Term, _Options) ->
     erlang:nif_error(undefined).
 
