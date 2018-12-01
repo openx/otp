@@ -946,3 +946,411 @@ json_enc_unicode(byte *d, byte *s, byte *send)
     }
     return d - dstart;
 }
+
+
+// -*- comment-start:"// " comment-end:"" -*-
+
+#include <alloca.h>
+#include <string.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#  define likely(x)     __builtin_expect((x), 1)
+#  define unlikely(x)   __builtin_expect((x), 0)
+#else
+#  define likely(x)     (x)
+#  define unlikely(x)   (x)
+#endif
+
+#define DEC_ARRAY       ((Eterm) 0xFFFFFFF0)
+#define DEC_OBJECT      ((Eterm) 0xFFFFFFF1)
+
+enum {
+    st_init = 0,
+    st_intm,
+    st_int0,
+    st_int1,
+    st_flt0,
+    st_flt1,
+    st_flt2,
+    st_flt3,
+    st_flt4,
+    st_str0,
+    st_str1,
+    st_lst0,
+    st_obj0,
+    st_obj1,
+    st_true0,
+    st_false0,
+    st_null0,
+    st_end,
+} state;
+
+#define WSTACK_PEEK(s)          (s.wsp[-1])
+#define WSTACK_PEEKN(s, n)      (s.wsp[(n) - 1])
+
+#define IS_CONTINUATION(c) (((c) & 0xC0) == 0x80)
+
+#define CC_WHITESPACE   ' ': case '\t': case '\n': case '\r'
+#define CC_DIGIT19      '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9'
+#define CC_DIGIT09      '0': case CC_DIGIT19
+#define CC_E            'E': case 'e'
+
+inline int
+__attribute__ ((const))
+hexdec(byte c)
+{
+    if (c >= '0' && c <= '9') { return c - '0'; }
+    c &= ~ ('a' - 'A'); // Mask off 0x20 bit to map lowercase to uppercase.
+    if (c >= 'A' && c <= 'F') { return c - 'A' + 0xA; }
+    return -1;
+}
+
+Eterm
+chars_to_float(Process *p, byte *s, int slen)
+{
+    Eterm *hp = HAlloc(p, FLOAT_SIZE_OBJECT);
+    char *dbuf = alloca(slen);
+    FloatDef f;
+    memcpy(dbuf, s, slen);
+    dbuf[slen] = '\0';
+    f.fd = atof((char *) s);
+    PUT_DOUBLE(f, hp);
+    return make_float(hp);
+}
+
+void
+chars_to_utf8(byte *d, byte *s, byte *se)
+{
+    while (s < se) {
+        const int c = *s;
+        if (unlikely(c == '\\')) {
+            switch (s[1]) {
+            case '"':  *d++ = '"';  s += 2; break;
+            case '\\': *d++ = '\\'; s += 2; break;
+            case '/':  *d++ = '/';  s += 2; break;
+            case 'b':  *d++ = '\b'; s += 2; break;
+            case 'f':  *d++ = '\f'; s += 2; break;
+            case 'n':  *d++ = '\n'; s += 2; break;
+            case 'r':  *d++ = '\r'; s += 2; break;
+            case 't':  *d++ = '\t'; s += 2; break;
+            case 'u': {
+                int h0 = hexdec(s[2]);
+                int h1 = hexdec(s[3]);
+                int h2 = hexdec(s[4]);
+                int h3 = hexdec(s[5]);
+                int unicode = (h0 << 24) + (h1 << 16) + (h2 << 8) + h3;
+                s += 6;
+                if        (unicode <     0x80) {
+                    *d++ = unicode;
+                } else if (unicode <    0x800) { // 2-byte UTF-8.
+                    d[0] = 0xC0 | (unicode >>  6);
+                    d[1] = 0x80 | (unicode & 0x3F);
+                } else if (unicode <  0x10000) { // 3-byte UTF-8.
+                    d[0] = 0xE0 | (unicode >> 12);
+                    d[1] = 0x80 | ((unicode >>  6) & 0x3F);
+                    d[2] = 0x80 | (unicode & 0x3F);
+                } else if (unicode < 0x110000) { // 4-byte UTF-8.
+                    d[0] = 0xF0 | (unicode >> 18);
+                    d[1] = 0x80 | ((unicode >> 12) & 0x3F);
+                    d[2] = 0x80 | ((unicode >>  6) & 0x3F);
+                    d[3] = 0x80 | (unicode & 0x3F);
+                } else {
+                    abort();
+                }
+                break;
+            } // case 'u'
+            }
+        } else if (c < 0x80) {
+            *d++ = c; s++;
+        } else if (c < 0xC0) {
+            memcpy(d, s, 2); d += 2; s += 2;
+        } else if (c < 0xF0) {
+            memcpy(d, s, 3); d += 3; s += 3;
+        } else if (c < 0xF5) {
+            memcpy(d, s, 4); d += 4; s += 4;
+        } else {
+            abort();
+        }
+    }
+}
+
+int
+state_machine(Process *p, byte *ep, byte *endp)
+{
+    WSTACK_DECLARE(s);
+    int state = st_init;
+    byte *vp = NULL; // Pointer to start of value currently being decoded.
+    Eterm term = THE_NON_VALUE;
+    int strdiff = 0;
+
+
+#define PARSE_INT(s, se) erts_chars_to_integer(p, (char *) s, se - s, 10)
+#define PARSE_FLOAT(s, se) chars_to_float(p, s, se - s)
+
+
+    while (ep < endp) {
+        char c = *ep++;
+
+        switch (state) {
+        case st_init:
+            switch (c) {
+            case '0':           state = st_int0; vp = ep - 1; break;
+            case CC_DIGIT19:    state = st_int1; vp = ep - 1; break;
+            case '-':           state = st_intm; vp = ep - 1; break;
+            case '"':           state = st_str0; vp = ep; strdiff = 0; break;
+            case 't':           state = st_true0; break;
+            case 'f':           state = st_false0; break;
+            case 'n':           state = st_null0; break;
+            case '[':           state = st_init; WSTACK_PUSH(s, DEC_ARRAY); break;
+            case '{':           state = st_obj0; WSTACK_PUSH(s, DEC_OBJECT); break;
+            case CC_WHITESPACE: goto skip_whitespace;
+            default:            goto fail;
+            }
+            break;
+        case st_intm:
+            switch (c) {
+            case CC_DIGIT19:    state = st_int1; break;
+            default:            goto fail;
+            }
+            break;
+        case st_int0:
+            switch (c) {
+            case '.':           state = st_flt0; break;
+            case CC_E:          state = st_flt2; break;
+            case ',':           term = PARSE_INT(vp, ep - 1); goto handle_comma;
+            case ']':           term = PARSE_INT(vp, ep - 1); goto end_list;
+            case '}':           term = PARSE_INT(vp, ep - 1); goto end_object;
+            case CC_WHITESPACE: term = PARSE_INT(vp, ep - 1); goto skip_whitespace;
+            default :           goto fail;
+            }
+            break;
+        case st_int1:
+            switch (c) {
+            case '.':           state = st_flt1; break;
+            case CC_E:          state = st_flt2; break;
+            case CC_DIGIT09:    state = st_int1; break;
+            case ',':           term = PARSE_INT(vp, ep - 1); goto handle_comma;
+            case ']':           term = PARSE_INT(vp, ep - 1); goto end_list;
+            case '}':           term = PARSE_INT(vp, ep - 1); goto end_object;
+            case CC_WHITESPACE: term = PARSE_INT(vp, ep - 1); goto skip_whitespace;
+            default:            goto fail;
+            }
+            break;
+        case st_flt0:
+            switch (c) {
+            case CC_DIGIT09:    state = st_flt1; break;
+            default:            goto fail;
+            }
+            break;
+        case st_flt1:
+            switch (c) {
+            case CC_DIGIT09:    break;
+            case ',':           term = PARSE_FLOAT(vp, ep - 1); goto handle_comma;
+            case ']':           term = PARSE_FLOAT(vp, ep - 1); goto end_list;
+            case '}':           term = PARSE_FLOAT(vp, ep - 1); goto end_object;
+            case CC_WHITESPACE: term = PARSE_FLOAT(vp, ep - 1); goto skip_whitespace;
+            default:            goto fail;
+            }
+            break;
+        case st_flt2:
+            switch (c) {
+            case '+': case '-': state = st_flt3; break;
+            case CC_DIGIT09:    state = st_flt4; break;
+            default:            goto fail;
+            }
+            break;
+        case st_flt3:
+            switch (c) {
+            case CC_DIGIT09:    state = st_flt4; break;
+            default:            goto fail;
+            }
+            break;
+        case st_flt4:
+            switch (c) {
+            case CC_DIGIT09:    break;
+            case ',':           term = PARSE_FLOAT(vp, ep - 1); goto handle_comma;
+            case ']':           term = PARSE_FLOAT(vp, ep - 1); goto end_list;
+            case '}':           term = PARSE_FLOAT(vp, ep - 1); goto end_object;
+            case CC_WHITESPACE: term = PARSE_FLOAT(vp, ep - 1); goto skip_whitespace;
+            default:            goto fail;
+            }
+            break;
+        case st_str0:
+            switch (c) {
+            case '\\':          state = st_str1; break;
+            case '"':
+                // We've scanned to the end of a string, but it might be long
+                // so we're going to copy it in chunks.
+                // ASSERT(context->result_bin == NULL);
+                // ep is pointing just after the '"' that is ends the string,
+                // so we have to subtract 1.
+                // context->result_bin = erts_bin_nrml_alloc(ep - vp - strdiff - 1);
+                // context->dp = context->result_bin->orig_bytes;
+                {
+                    Binary *result_bin = erts_bin_nrml_alloc(ep - vp - strdiff - 1);
+                    chars_to_utf8((byte *) result_bin->orig_bytes, vp, ep - 1);
+                    term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
+                }
+                break;
+            default:
+                if     (unlikely(c < 0x20)) {
+                    goto fail;
+                } else if (c < 0x80) {
+                    ;
+                } else if (c < 0xC0) {
+                    if (unlikely(ep + 1 >= endp)) goto fail;
+                    if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
+                    ep += 1;
+                } else if (c < 0xF0) {
+                    if (unlikely(ep + 2 >= endp)) goto fail;
+                    if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
+                    if (unlikely(! IS_CONTINUATION(ep[1]))) goto fail;
+                    ep += 2;
+                } else if (c < 0xF5) {
+                    if (unlikely(ep + 3 >= endp)) goto fail;
+                    if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
+                    if (unlikely(! IS_CONTINUATION(ep[1]))) goto fail;
+                    if (unlikely(! IS_CONTINUATION(ep[2]))) goto fail;
+                    ep += 3;
+                } else {
+                    goto fail;
+                }
+                break;
+            }
+            break;
+        case st_str1:
+            switch (c) {
+            case '"': case '\\': case '/': case 'b': case 'f': case 'n': case 'r': case 't':
+                state = st_str0; strdiff++; break;
+            case 'u': {
+                Uint h0, h1, h2, h3; int unicode;
+                if (unlikely(ep + 4 >= endp)) { goto fail; }
+                h0 = hexdec(ep[0]);
+                h1 = hexdec(ep[1]);
+                h2 = hexdec(ep[2]);
+                h3 = hexdec(ep[3]);
+                if (unlikely(h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0)) goto fail;
+                unicode = (h0 << 24) + (h1 << 16) + (h2 << 8) + h3;
+                ep += 4;
+                if      (unicode <     0x80) { strdiff += (6 - 1); } // 1-byte UTF-8.
+                else if (unicode <    0x800) { strdiff += (6 - 2); } // 2-byte UTF-8.
+                else if (unicode <  0x10000) { strdiff += (6 - 3); } // 3-byte UTF-8.
+                else if (unicode < 0x110000) { strdiff += (6 - 4); } // 4-byte UTF-8.
+                else                         { goto fail; }
+                break;
+            } // case 'u'
+            default:
+                goto fail;
+            }
+            break;
+        case st_obj0:
+            switch (c) {
+            case '"':           state = st_str0; vp = ep; strdiff = 0; break;
+            case '}':           goto end_object;
+            case CC_WHITESPACE: break;
+            default:            goto fail;
+            }
+            break;
+        case st_obj1:
+            switch (c) {
+            case ':':           state = st_init; break;
+            case CC_WHITESPACE: break;
+            default:            goto fail;
+            }
+            break;
+        case st_true0:
+            if (likely(ep + 1 < endp && c == 'r' && ep[0] == 'u' && ep[1] == 'e')) {
+                ep += 2;
+                term = am_true;
+                state = st_end;
+            } else {
+                goto fail;
+            }
+            break;
+        case st_false0:
+            if (likely(ep + 2 < endp && c == 'a' && ep[0] == 'l' && ep[1] == 's' && ep[2] == 'e')) {
+                ep += 3;
+                term = am_false;
+                state = st_end;
+            } else {
+                goto fail;
+            }
+            break;
+        case st_null0:
+            if (likely(ep + 1 < endp && c == 'u' && ep[0] == 'l' && ep[1] == 'l')) {
+                ep += 2;
+                term = am_null;
+                state = st_end;
+            } else {
+                goto fail;
+            }
+            break;
+        case st_end:
+            // Skip whitespace after term.
+            switch (c) {
+            case ',':           goto handle_comma;
+            case ']':           goto end_list;
+            case '}':           goto end_object;
+            case CC_WHITESPACE: goto skip_whitespace;
+            default:            goto fail;
+            }
+            break;
+        } // switch (state)
+
+        if (0) {
+            Uint count;
+        handle_comma:
+            count = (Uint) WSTACK_PEEK(s);
+            switch (WSTACK_PEEKN(s, 2 * count + 1)) {
+            case DEC_ARRAY:
+                WSTACK_PUSH2(s, term, count + 1);
+                state = st_init;
+                break;
+            case DEC_OBJECT:
+                if (count % 2 != 0) goto fail;
+                WSTACK_PUSH2(s, term, count + 1);
+                state = st_init;
+                break;
+            default:
+                goto fail;
+            }
+        }
+        if (0) {
+            Uint count;
+        end_list: ;
+            count = WSTACK_PEEK(s);
+            if (WSTACK_PEEKN(s, 2 * count + 1) != DEC_ARRAY) goto fail;
+            // Create a list from the stack elements.
+            (void) WSTACK_POP(s);
+            state = st_end;
+        }
+        if (0) {
+            Uint count;
+        end_object: ;
+            count = WSTACK_PEEK(s);
+            if (count % 2 != 0)  goto fail;
+            if (WSTACK_PEEKN(s, 2 * count + 1) != DEC_OBJECT) goto fail;
+            // Create a hash or a proplist from the stack elements.
+            (void) WSTACK_POP(s);
+            state = st_end;
+        }
+        if (0) {
+        skip_whitespace:
+            if (ep < endp) {
+                switch (*ep) {
+                case CC_WHITESPACE: ep++; goto skip_whitespace;
+                default:            break;
+                }
+            }
+            break;
+        } // while (0)
+    } // while (ep < endp)
+
+    if (! WSTACK_ISEMPTY(s)) goto fail;
+
+    return 0;
+
+fail:
+    return -1;
+
+}
