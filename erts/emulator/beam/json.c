@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2017. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2018. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,6 +48,7 @@
 #include "erl_binary.h"
 #include "erl_bits.h"
 #include "erl_map.h"
+#include "hipe_stack.h"		// For likely and unlikely macros.
 
 typedef struct T2JContext_struct {
     int alive;
@@ -58,11 +59,16 @@ typedef struct T2JContext_struct {
     Binary *result_bin;
 } T2JContext;
 
+typedef struct J2TContext_struct {
+    Uint flags;
+    ErtsWStack wstack;
+} J2TContext;
+
 static Export term_to_json_trap_export;
 
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
 
-static Eterm erts_term_to_json_int(Process* p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b);
+static Eterm erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b);
 
 static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
 
@@ -117,7 +123,7 @@ HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 2)
 /* erlang:term_to_json/2 entry point. */
 BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 {
-    Process* p = BIF_P;
+    Process *p = BIF_P;
     Eterm Term = BIF_ARG_1;
     Eterm Options = BIF_ARG_2;
     Sint buf_size = TERM_TO_JSON_DEFAULT_INITIAL_SIZE;
@@ -125,7 +131,7 @@ BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 
     while (is_list(Options)) {
         Eterm arg = CAR(list_val(Options));
-        Eterm* tp;
+        Eterm *tp;
         if (is_tuple(arg) && *(tp = tuple_val(arg)) == make_arityval(2)) {
             if (ERTS_IS_ATOM_STR("min_buf_size", tp[1]) && tag_val_def(tp[2]) == SMALL_DEF) {
                 buf_size = signed_val(tp[2]);
@@ -174,7 +180,7 @@ static int t2j_context_destructor(Binary *context_bin)
 #define JSON_DONE	2
 
 static BIF_RETTYPE
-erts_term_to_json_int(Process* p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b)
+erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b)
 {
 #ifndef EXTREME_TTB_TRAPPING
     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
@@ -237,7 +243,7 @@ erts_term_to_json_int(Process* p, Eterm Term, Sint initial_buf_size, Uint flags,
         context->result_bin = NULL;
         if (! is_first_call) {
             erts_set_gc_state(p, 1);
-            ERTS_BIF_ERROR_TRAPPED1(p, EXC_BADARG, bif_export[BIF_term_to_json_1], Term);
+            ERTS_BIF_ERROR_TRAPPED1(p, EXC_BADARG, bif_export[BIF_term_to_json_1], term);
         } else {
             BIF_ERROR(p, EXC_BADARG);
         }
@@ -339,7 +345,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
             break;
 
         case ENC_ARRAY_ELEMENT: {
-            Eterm* cons;
+            Eterm *cons;
             Eterm tail;
           enc_array_element:
             switch (tag_val_def(obj)) {
@@ -363,9 +369,9 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 
         case ENC_OBJECT_ELEMENT: {
             // Encodes the proplist JSON object representation.
-            Eterm* cons;
+            Eterm *cons;
             Eterm tail;
-            Eterm* tuple;
+            Eterm *tuple;
             Uint tuple_len;
           enc_object_element:
             switch (tag_val_def(obj)) {
@@ -631,7 +637,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
             goto enc_array_element;
 
         case TUPLE_DEF: {
-            Eterm* tuple = tuple_val(obj);
+            Eterm *tuple = tuple_val(obj);
             switch (arityval(*tuple)) {
             case 1:
                 // A single-element tuple containing a list represents a JSON object.
@@ -947,19 +953,22 @@ json_enc_unicode(byte *d, byte *s, byte *send)
     return d - dstart;
 }
 
+////////////////////////////////////////////////////////////////////////
 
-// -*- comment-start:"// " comment-end:"" -*-
+/* erlang:json_to_term/1 entry point. */
+BIF_RETTYPE json_to_term_1(BIF_ALIST_1)
+{
+    return erts_json_to_term_int(BIF_P, BIF_ARG_1);
+}
+
+erts_json_to_term_int(Process *p, Eterm json)
+{
+    dec_json_int()
+}
+
 
 #include <alloca.h>
 #include <string.h>
-
-#if defined(__GNUC__) || defined(__clang__)
-#  define likely(x)     __builtin_expect((x), 1)
-#  define unlikely(x)   __builtin_expect((x), 0)
-#else
-#  define likely(x)     (x)
-#  define unlikely(x)   (x)
-#endif
 
 #define DEC_ARRAY       ((Eterm) 0xFFFFFFF0)
 #define DEC_OBJECT      ((Eterm) 0xFFFFFFF1)
@@ -1354,3 +1363,9 @@ fail:
     return -1;
 
 }
+
+// Local Variables:
+// comment-start:"// "
+// comment-end:""
+// End:
+
