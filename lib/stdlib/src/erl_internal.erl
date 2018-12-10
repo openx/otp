@@ -321,6 +321,8 @@ bif(is_reference, 1) -> true;
 bif(is_tuple, 1) -> true;
 bif(is_record, 2) -> true;
 bif(is_record, 3) -> true;
+bif(json_to_term, 1) -> true;
+bif(json_to_term, 2) -> true;
 bif(length, 1) -> true;
 bif(link, 1) -> true;
 bif(list_to_atom, 1) -> true;
