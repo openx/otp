@@ -132,7 +132,7 @@
 -export([integer_to_binary/1, integer_to_list/1]).
 -export([iolist_size/1, iolist_to_binary/1, iolist_to_iovec/1]).
 -export([is_alive/0, is_builtin/3, is_process_alive/1, length/1, link/1]).
--export([term_to_json/1]).
+-export([term_to_json/1, term_to_json/2, json_to_term/1, json_to_term/2]).
 -export([list_to_atom/1, list_to_binary/1]).
 -export([list_to_bitstring/1, list_to_existing_atom/1, list_to_float/1]).
 -export([list_to_integer/1, list_to_integer/2]).
@@ -2473,6 +2473,17 @@ term_to_json(_Term) ->
       Options :: [{min_buf_size, pos_integer()} |
                   use_nil ].
 term_to_json(_Term, _Options) ->
+    erlang:nif_error(undefined).
+
+-spec json_to_term(Json) -> term() when
+      Json :: json_binary().
+json_to_term(_Json) ->
+    erlang:nif_error(undefined).
+
+-spec json_to_term(Json, Options) -> term() when
+      Json :: json_binary(),
+      Options :: [].
+json_to_term(_Json, _Options) ->
     erlang:nif_error(undefined).
 
 %% Shadowed by erl_bif_types: erlang:tl/1
