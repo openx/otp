@@ -382,10 +382,10 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		cons = list_val(obj);
 		tail = CDR(cons);
 		obj = CAR(cons);
-		if (tag_val_def(obj) != TUPLE_DEF) { goto fail; }
+		if (unlikely(tag_val_def(obj) != TUPLE_DEF)) { goto fail; }
 		tuple = tuple_val(obj);
 		tuple_len = arityval(*tuple);
-		if (tuple_len != 2) { goto fail; }
+		if (unlikely(tuple_len != 2)) { goto fail; }
 		obj = tuple[1];
 		if (obj == am_json) {
 		    // Preencoded JSON.
@@ -472,7 +472,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    ENSURE_BUFFER(a->len * MAX_UTF8_EXPANSION + 2);
 	    *ep++ = '"';
 	    strlen = json_enc_unicode(ep, a->name, a->name + a->len);
-	    if (strlen < 0) { goto fail; }
+	    if (unlikely(strlen < 0)) { goto fail; }
 	    ep += strlen;
 	    *ep++ = '"';
 	    obj = THE_NON_VALUE;
@@ -519,7 +519,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		if (aligned_alloc != NULL) {
 		    erts_free_aligned_binary_bytes_extra(aligned_alloc, ERTS_ALC_T_BINARY_BUFFER);
 		}
-		if (strlen < 0) { goto fail; }
+		if (unlikely(strlen < 0)) { goto fail; }
 		ep += strlen;
 		*ep++ = '"';
 		reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
@@ -535,10 +535,10 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		Uint bitoffs;
 		Uint bitsize;
 	    enc_json_start:
-		if (tag_val_def(obj) != BINARY_DEF) { goto fail; }
+		if (unlikely(tag_val_def(obj) != BINARY_DEF)) { goto fail; }
 		ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
-		if (bitsize != 0) { goto fail; }
-		if (bitoffs % 8 != 0) { goto fail; }
+		if (unlikely(bitsize != 0)) { goto fail; }
+		if (unlikely(bitoffs % 8 != 0)) { goto fail; }
 		bytes += bitoffs / 8;
 		len = binary_size(obj);
 	    }
@@ -650,7 +650,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		goto fail;
 	    case 2:
 		// A two-element tuple whose first element is 'json' is preencoded JSON.
-		if (tuple[1] != am_json) { goto fail; };
+		if (unlikely(tuple[1] != am_json)) { goto fail; };
 		obj = tuple[2];
 		goto enc_json_start;
 	    }
@@ -734,7 +734,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 	    ERTS_GET_BINARY_BYTES(obj, bytes, bitoffs, bitsize);
 
 	    // We don't handle bitstrings.
-	    if (bitsize != 0) { goto fail; }
+	    if (unlikely(bitsize != 0)) { goto fail; }
 
 	    len = binary_size(obj);
 	    chunked_conversion = ctx != NULL && len > reds * TERM_TO_JSON_MEMCPY_FACTOR;
@@ -743,7 +743,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		    obj, &aligned_alloc,
 		    (chunked_conversion ? ERTS_ALC_T_EXT_TERM_DATA : ERTS_ALC_T_TMP),
 		    0);
-		if (bytes == NULL) { goto fail; }
+		if (unlikely(bytes == NULL)) { goto fail; }
 	    }
 
 	    if (chunked_conversion) {
@@ -757,7 +757,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		if (aligned_alloc != NULL) {
 		    erts_free_aligned_binary_bytes_extra(aligned_alloc, ERTS_ALC_T_TMP);
 		}
-		if (strlen < 0) { goto fail; }
+		if (unlikely(strlen < 0)) { goto fail; }
 		ep += strlen;
 		*ep++ = '"';
 		reds -= len / TERM_TO_JSON_MEMCPY_FACTOR;
