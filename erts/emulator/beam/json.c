@@ -69,33 +69,45 @@ typedef struct T2JContext_struct {
 } T2JContext;
 
 typedef struct J2TContext_struct {
+    int alive;
     Uint flags;
+    int state;
+    const byte *ep;
+    const byte *vp;
+    const byte *endp;
+    Eterm term;
+    int strdiff;
     ErtsWStack wstack;
 } J2TContext;
 
+
 static Export term_to_json_trap_export;
+static Export json_to_term_trap_export;
 
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
+static BIF_RETTYPE json_to_term_trap_1(BIF_ALIST_1);
 
 static Eterm erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b);
-static Eterm erts_json_to_term_int(Process *p, Eterm Json);
+static Eterm erts_json_to_term_int(Process *p, Eterm Json, Uint flags, Binary *context_b);
 
 static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
-static int dec_json_int(Process *p, byte *ep, byte *endp, Eterm *result_term);
-
+static int dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg);
 
 unsigned i64ToAsciiTable(char *dst, int64_t value);
 Sint json_enc_unicode(byte *d, byte *s, byte *send);
 
 
-void erts_init_json(void) {
+void erts_init_json(void)
+{
     erts_init_trap_export(&term_to_json_trap_export,
-                          am_erts_internal, am_term_to_json_trap, 1,
+                          am_erlang, am_term_to_json_trap,
+                          1, // Arity of term_to_json_trap_1 function.
                           &term_to_json_trap_1);
 
-    erts_init_trap_export(&term_to_json_trap_export,
-                          am_erts_internal, am_term_to_json_trap, 2,
-                          &term_to_json_trap_1);
+    erts_init_trap_export(&json_to_term_trap_export,
+                          am_erlang, am_json_to_term_trap,
+                          1, // Arity of json_to_term_trap_1 function.
+                          &json_to_term_trap_1);
 }
 
 /* Define EXTREME_TTB_TRAPPING for testing in dist.h */
@@ -110,7 +122,7 @@ void erts_init_json(void) {
 
 /**********************************************************************/
 
-/* Continue work after either term_to_json_1 or term_to_json_2 return via
+/* Continue work after either term_to_json_1 or term_to_json_2 returns via
    BIF_TRAP1. */
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
 {
@@ -119,7 +131,7 @@ static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1)
     Eterm bt = tp[2];
     Binary *context = erts_magic_ref2bin(bt);
 
-    return erts_term_to_json_int(BIF_P, Term, 0, 0, context);
+    return erts_term_to_json_int(BIF_P, Term, /* buf_size */ 0, /* flags */ 0, context);
 }
 
 HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 1)
@@ -127,7 +139,7 @@ HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 1)
 /* erlang:term_to_json/1 entry point. */
 BIF_RETTYPE term_to_json_1(BIF_ALIST_1)
 {
-    return erts_term_to_json_int(BIF_P, BIF_ARG_1, TERM_TO_JSON_DEFAULT_INITIAL_SIZE, 0,  NULL);
+    return erts_term_to_json_int(BIF_P, BIF_ARG_1, TERM_TO_JSON_DEFAULT_INITIAL_SIZE, 0, NULL);
 }
 
 HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 2)
@@ -227,21 +239,23 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags,
     case JSON_YIELD: {
         // Ran out of reductions; yield.
         Eterm *hp;
-        Eterm c_term;
+        Eterm ctx_term;
 
         if (context_b == NULL) {
-            context_b = erts_create_magic_binary(sizeof (TTBContext), t2j_context_destructor);
+            context_b = erts_create_magic_binary(sizeof context_buf, t2j_context_destructor);
             context = ERTS_MAGIC_BIN_DATA(context_b);
-            sys_memcpy(context, &context_buf, sizeof (TTBContext));
+            sys_memcpy(context, &context_buf, sizeof context_buf);
         }
         if (is_first_call) {
             erts_set_gc_state(p, 0);
         }
 
-        hp = HAlloc(p, ERTS_MAGIC_REF_THING_SIZE+3);
-        c_term = erts_mk_magic_ref(&hp, &MSO(p), context_b);
+        // I'm not sure why this creates a tuple for BIF_TRAP1 instead of using BIF_TRAP2.
+        hp = HAlloc(p, ERTS_MAGIC_REF_THING_SIZE + 3); // +3 for 2-tuple.
+        ctx_term = erts_mk_magic_ref(&hp, &MSO(p), context_b);
         BUMP_ALL_REDS(p);
-        BIF_TRAP1(&term_to_json_trap_export, p, TUPLE2(hp, Term, c_term));
+        BIF_TRAP1(&term_to_json_trap_export, p, TUPLE2(hp, Term, ctx_term));
+        /*NOTREACHED*/
     }
 
     case JSON_BADARG:
@@ -259,6 +273,7 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags,
         } else {
             BIF_ERROR(p, EXC_BADARG);
         }
+        /*NOTREACHED*/
 
     case JSON_DONE: {
         // Finished; create return value.
@@ -275,8 +290,9 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags,
             erts_set_gc_state(p, 1);
         }
         BIF_RET(erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin));
+        /*NOTREACHED*/
     }
-    }
+    } // switch enc_json_int
     abort();
 }
 
@@ -296,16 +312,6 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags,
 
 #define IS_UTF8_CONTINUATION_BYTE(byte) (((byte) & 0xC0) == 0x80)
 
-#if 0
-static byte*
-enc_json(Eterm obj, byte* ep, Uint32 flags)
-{
-    byte *res;
-    (void) enc_json_int(NULL, obj, ep, flags, NULL, &res);
-    return res;
-}
-#endif
-
 /* Interruptable JSON encoder.  Returns 0 when term is completely encoded, or
    -1 when out of reductions. */
 
@@ -313,22 +319,21 @@ static int
 enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg)
 {
     WSTACK_DECLARE(s);
-    Sint reds = 0;
+    Sint reds = *reds_arg;
     byte *endp = (byte *) (*result_bin_arg)->orig_bytes + (*result_bin_arg)->orig_size;
 
-    if (ctx) {
-        WSTACK_CHANGE_ALLOCATOR(s, ERTS_ALC_T_SAVED_ESTACK);
-        reds = *reds_arg;
+    WSTACK_CHANGE_ALLOCATOR(s, ERTS_ALC_T_SAVED_ESTACK);
 
-        if (ctx->wstack.wstart) { /* restore saved stacks and byte pointer */
-            WSTACK_RESTORE(s, &ctx->wstack);
-            ep = ctx->ep;
-            obj = ctx->obj;
-            if (is_non_value(obj)) {
-                goto outer_loop;
-            }
+    if (ctx->wstack.wstart) { /* restore saved stacks and byte pointer */
+        WSTACK_RESTORE(s, &ctx->wstack);
+        ep = ctx->ep;
+        obj = ctx->obj;
+        if (is_non_value(obj)) {
+            goto outer_loop;
         }
     }
+
+    goto encode_term_no_reduction_check;
 
 
 #define ENSURE_BUFFER(n)						\
@@ -345,8 +350,6 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
         }								\
     } while (0)
 
-
-    goto encode_term_no_reduction_check;
 
  outer_loop:
     while (! WSTACK_ISEMPTY(s)) {
@@ -965,14 +968,27 @@ json_enc_unicode(byte *d, byte *s, byte *send)
     return d - dstart;
 }
 
-////////////////////////////////////////////////////////////////////////
+/**********************************************************************/
+
+/* Continue work after either json_to_term_1 or json_to_term__2 returns via
+   BIF_TRAP1. */
+static BIF_RETTYPE json_to_term_trap_1(BIF_ALIST_1)
+{
+    Eterm *tp = tuple_val(BIF_ARG_1);
+    Eterm Json = tp[1];
+    Eterm bt = tp[2];
+    Binary *context = erts_magic_ref2bin(bt);
+
+    return erts_json_to_term_int(BIF_P, Json, /* flags */ 0, context);
+}
+
 
 HIPE_WRAPPER_BIF_DISABLE_GC(json_to_term, 1)
 
 /* erlang:json_to_term/1 entry point. */
 BIF_RETTYPE json_to_term_1(BIF_ALIST_1)
 {
-    return erts_json_to_term_int(BIF_P, BIF_ARG_1);
+    return erts_json_to_term_int(BIF_P, BIF_ARG_1, 0, NULL);
 }
 
 HIPE_WRAPPER_BIF_DISABLE_GC(json_to_term, 2)
@@ -981,36 +997,113 @@ HIPE_WRAPPER_BIF_DISABLE_GC(json_to_term, 2)
 BIF_RETTYPE json_to_term_2(BIF_ALIST_2)
 {
     // Second argument is currently ignored. @@
-    return erts_json_to_term_int(BIF_P, BIF_ARG_1);
+    return erts_json_to_term_int(BIF_P, BIF_ARG_1, 0, NULL);
 }
 
-static Eterm
-erts_json_to_term_int(Process *p, Eterm Json)
+static int j2t_context_destructor(Binary *context_bin)
 {
-    byte *bytes;
-    Uint bitoffs;
-    Uint bitsize;
-    Uint len;
+    J2TContext *context = ERTS_MAGIC_BIN_DATA(context_bin);
+    if (context->alive) {
+        context->alive = 0;
+        DESTROY_SAVED_WSTACK(&context->wstack);
+    }
+    return 1;
+}
+
+#define ST_INIT 0
+
+static Eterm
+erts_json_to_term_int(Process *p, Eterm Json, Uint flags, Binary *context_b)
+{
+// #ifndef EXTREME_TTB_TRAPPING
+//     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
+// #else
+    Sint reds = 4; /* For testing */
+// #endif
+    Sint initial_reds = reds;
+    int is_first_call;
+    J2TContext context_buf;
+    J2TContext *context;
     Eterm result_term;
 
     if (! is_binary(Json)) {
         BIF_ERROR(p, EXC_BADARG);
     }
 
-    ERTS_GET_BINARY_BYTES(Json, bytes, bitoffs, bitsize);
+    if (context_b == NULL) {
+        byte *bytes;
+        Uint bitoffs, bitsize, len;
 
-    if (bitoffs != 0 || bitsize % 8 != 0) {
-        BIF_ERROR(p, EXC_BADARG);
+        ERTS_GET_BINARY_BYTES(Json, bytes, bitoffs, bitsize);
+
+        if (bitoffs != 0 || bitsize % 8 != 0) {
+            BIF_ERROR(p, EXC_BADARG);
+        }
+
+        len = binary_size(Json);
+
+        is_first_call = 1;
+        context_buf.alive = 1;
+        context_buf.flags = flags;
+        context_buf.state = ST_INIT;
+        context_buf.ep = bytes;
+        context_buf.vp = NULL;
+        context_buf.endp = bytes + len;
+        context_buf.term = THE_NON_VALUE;
+        context_buf.strdiff = 0;
+        context_buf.wstack.wstart = NULL;
+        context = &context_buf;
+    } else {
+        is_first_call = 0;
+        context = ERTS_MAGIC_BIN_DATA(context_b);
     }
 
-    len = binary_size(Json);
-    switch (dec_json_int(p, bytes, bytes + len, &result_term)) {
-    case JSON_YIELD:
-        BIF_ERROR(p, EXC_INTERNAL_ERROR);
+    switch (dec_json_int(p, context, &reds, &result_term)) {
+    case JSON_YIELD: {
+        // Ran out of reductions; yield.
+        Eterm *hp;
+        Eterm ctx_term;
+
+        if (context_b == NULL) {
+            context_b = erts_create_magic_binary(sizeof context_buf, j2t_context_destructor);
+            context = ERTS_MAGIC_BIN_DATA(context_b);
+            sys_memcpy(context, &context_buf, sizeof context_buf);
+        }
+        if (is_first_call) {
+            erts_set_gc_state(p, 0);
+        }
+
+        // I'm not sure why this creates a tuple for BIF_TRAP1 instead of using BIF_TRAP2.
+        hp = HAlloc(p, ERTS_MAGIC_REF_THING_SIZE + 3); // +3 for 2-tuple.
+        ctx_term = erts_mk_magic_ref(&hp, &MSO(p), context_b);
+        BUMP_ALL_REDS(p);
+        BIF_TRAP1(&json_to_term_trap_export, p, TUPLE2(hp, Json, ctx_term));
+        /*NOTREACHED*/
+    }
+
     case JSON_BADARG:
-        BIF_ERROR(p, EXC_BADARG);
+        if (context_b && erts_refc_read(&context_b->intern.refc, 0) == 0) {
+            erts_bin_free(context_b);
+        }
+        if (! is_first_call) {
+            erts_set_gc_state(p, 1);
+            ERTS_BIF_ERROR_TRAPPED1(p, EXC_BADARG, bif_export[BIF_json_to_term_1], Json);
+        } else {
+            BIF_ERROR(p, EXC_BADARG);
+        }
+        /*NOTREACHED*/
+
     case JSON_DONE:
+        BUMP_REDS(p, (initial_reds - reds) / TERM_TO_JSON_LOOP_FACTOR);
+        context->alive = 0;
+        if (context_b && erts_refc_read(&context_b->intern.refc, 0) == 0) {
+            erts_bin_free(context_b);
+        }
+        if (! is_first_call) {
+            erts_set_gc_state(p, 1);
+        }
         BIF_RET(result_term);
+        /*NOTREACHED*/
     }
     abort();
 }
@@ -1023,7 +1116,7 @@ erts_json_to_term_int(Process *p, Eterm Json)
 #define DEC_OBJECT      ((Eterm) 0xFFFFFFF1)
 
 enum {
-    st_init = 0,
+    st_init = ST_INIT,
     st_intm,
     st_int0,
     st_int1,
@@ -1063,20 +1156,20 @@ hexdec(byte c)
 }
 
 static Eterm
-chars_to_float(Process *p, byte *s, int slen)
+chars_to_float(Process *p, const byte * const s, int slen)
 {
     Eterm *hp = HAlloc(p, FLOAT_SIZE_OBJECT);
     char *dbuf = alloca(slen);
     FloatDef f;
     memcpy(dbuf, s, slen);
     dbuf[slen] = '\0';
-    f.fd = atof((char *) s);
+    f.fd = atof((char *) dbuf);
     PUT_DOUBLE(f, hp);
     return make_float(hp);
 }
 
 static void
-chars_to_utf8(byte *d, byte *s, byte *se)
+chars_to_utf8(byte *d, const byte *s, const byte * const se)
 {
     while (s < se) {
         const int c = *s;
@@ -1134,13 +1227,23 @@ chars_to_utf8(byte *d, byte *s, byte *se)
 }
 
 static int
-dec_json_int(Process *p, byte *ep, byte *endp, Eterm *result_term)
+dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg)
 {
     WSTACK_DECLARE(s);
-    int state = st_init;
-    byte *vp = NULL; // Pointer to start of value currently being decoded.
-    Eterm term = THE_NON_VALUE;
-    int strdiff = 0;
+    Sint reds = *reds_arg;
+
+    int state = ctx->state;
+    const byte *ep = ctx->ep;
+    const byte *vp = ctx->vp; // Pointer to start of value currently being decoded.
+    const byte * const endp = ctx->endp;
+    Eterm term = ctx->term;
+    int strdiff = ctx->strdiff;
+
+    WSTACK_CHANGE_ALLOCATOR(s, ERTS_ALC_T_SAVED_ESTACK);
+
+    if (ctx->wstack.wstart) {
+        WSTACK_RESTORE(s, &ctx->wstack);
+    }
 
 
 #define PARSE_INT(s, se) erts_chars_to_integer(p, (char *) s, se - s, 10)
@@ -1490,13 +1593,26 @@ dec_json_int(Process *p, byte *ep, byte *endp, Eterm *result_term)
             }
 
         } // if (0)
+
+        if (--reds <= 0) {
+            *reds_arg = 0;
+            ctx->state = state;
+            ctx->ep = ep;
+            ctx->vp = vp;
+            ctx->term = term;
+            ctx->strdiff = strdiff;
+            WSTACK_SAVE(s, &ctx->wstack);
+            return JSON_YIELD;
+        };
+
+
     } // while (1)
 
 done:
     if (! WSTACK_ISEMPTY(s)) goto fail;
     DESTROY_WSTACK(s);
 
-    *result_term = term;
+    *result_term_arg = term;
 
     return JSON_DONE;
 
