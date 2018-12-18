@@ -8,7 +8,7 @@
          unicode/1, binaries/1, bigints/1,
          preencoded/1, use_nil/1, bufsize/1, errors/1,
          j2t_basic_types/1, j2t_integers/1, j2t_floats/1,
-         j2t_lists/1, j2t_objects_proplist/1, j2t_unicode/1, j2t_errors/1]).
+         j2t_lists/1, j2t_objects_proplist/1, j2t_string/1, j2t_unicode/1, j2t_errors/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -20,7 +20,7 @@ all() ->
      objects_proplist, objects_flatmap, objects_hamt, objects_atomkey,
      unicode, binaries, bigints, preencoded, use_nil, bufsize, errors,
      j2t_basic_types, j2t_integers, j2t_floats,
-     j2t_lists, j2t_objects_proplist, j2t_unicode, j2t_errors].
+     j2t_lists, j2t_objects_proplist, j2t_string, j2t_unicode, j2t_errors].
 
 groups() ->
     [].
@@ -383,6 +383,18 @@ j2t_objects_proplist(Config) when is_list(Config) ->
     {[]} = erlang:json_to_term(<<" { } ">>),
     {[{<<"a">>, 1}]} = erlang:json_to_term(<<" { \"a\" : 1 } ">>),
     {[{<<"a">>, 1}, {<<"b">>, 2}]} = erlang:json_to_term(<<" { \"a\" : 1 , \"b\" : 2 } ">>),
+    ok.
+
+j2t_string(Config) when is_list(Config) ->
+    %% Decode a long binary.
+    L1 = list_to_binary(lists:duplicate(10000, [ <<"\\u058D", 214, 142>> ])),
+    L2 = list_to_binary(lists:duplicate(10000, [ <<214, 141, 214, 142>> ])),
+    ?assertEqual(L2, erlang:json_to_term(<<34, L1/binary, 34 >>)),
+    ?assertEqual(<<"a", L2/binary>>, erlang:json_to_term(<<34, "a", L1/binary, 34>>)),
+    ?assertEqual(<<"ab", L2/binary>>, erlang:json_to_term(<<34, "ab", L1/binary, 34>>)),
+    ?assertEqual(<<"abc", L2/binary>>, erlang:json_to_term(<<34, "abc", L1/binary, 34>>)),
+    ?assertEqual(<<"abcd", L2/binary>>, erlang:json_to_term(<<34, "abcd", L1/binary, 34>>)),
+    ?assertEqual(<<"abcde", L2/binary>>, erlang:json_to_term(<<34, "abcde", L1/binary, 34>>)),
     ok.
 
 j2t_unicode(Config) when is_list(Config) ->
