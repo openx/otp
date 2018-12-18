@@ -1015,11 +1015,11 @@ static int j2t_context_destructor(Binary *context_bin)
 static Eterm
 erts_json_to_term_int(Process *p, Eterm Json, Uint flags, Binary *context_b)
 {
-// #ifndef EXTREME_TTB_TRAPPING
-//     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
-// #else
+#ifndef EXTREME_TTB_TRAPPING
+    Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
+#else
     Sint reds = 4; /* For testing */
-// #endif
+#endif
     Sint initial_reds = reds;
     int is_first_call;
     J2TContext context_buf;
@@ -1134,6 +1134,7 @@ enum {
     st_false0,
     st_null0,
     st_end,
+    st_str_decode,
 } state;
 
 #define WSTACK_PEEK(s)          (s.wsp[-1])
@@ -1169,8 +1170,13 @@ chars_to_float(Process *p, const byte * const s, int slen)
     return make_float(hp);
 }
 
-static void
-chars_to_utf8(byte *d, const byte *s, const byte * const se)
+// Decodes a JSON string from s to a UTF-8 string d, stopping at se.  May copy
+// past se if se is in the middle of a JSON-encoded character.  This can
+// happen when copying a JSON string in parts, where we cannot determine where
+// the JSON character boundaries are without scanning from the beginning of
+// the JSON string.  Returns a pointer just after the last input byte decoded.
+static byte const *
+chars_to_utf8(byte *d, const byte *s, const byte * const se, byte **de)
 {
     while (s < se) {
         const int c = *s;
@@ -1197,22 +1203,15 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se)
                     d[0] = 0xC0 | (unicode >>  6);
                     d[1] = 0x80 | (unicode & 0x3F);
                     d += 2;
-                } else if (unicode <  0x10000) { // 3-byte UTF-8.
+                } else { // if (unicode <  0x10000) { // 3-byte UTF-8.
                     d[0] = 0xE0 | (unicode >> 12);
                     d[1] = 0x80 | ((unicode >>  6) & 0x3F);
                     d[2] = 0x80 | (unicode & 0x3F);
                     d += 3;
-                // } else if (unicode < 0x110000) { // 4-byte UTF-8.
-                //     d[0] = 0xF0 | (unicode >> 18);
-                //     d[1] = 0x80 | ((unicode >> 12) & 0x3F);
-                //     d[2] = 0x80 | ((unicode >>  6) & 0x3F);
-                //     d[3] = 0x80 | (unicode & 0x3F);
-                } else {
-                    abort();
                 }
                 break;
             } // case 'u'
-            }
+            } // switch s[1]
         } else if (c < 0x80) {
             *d++ = c; s++;
         } else if (c < 0xE0) {
@@ -1225,6 +1224,10 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se)
             abort();
         }
     }
+
+    if (de != NULL) { *de = d; }
+
+    return s;
 }
 
 static int
@@ -1246,6 +1249,9 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
         WSTACK_RESTORE(s, &ctx->wstack);
     }
 
+    if (state == st_str_decode) {
+        goto decode_string;
+    }
 
 #define PARSE_INT(s, se) erts_chars_to_integer(p, (char *) s, se - s, 10)
 #define PARSE_FLOAT(s, se) chars_to_float(p, s, se - s)
@@ -1366,27 +1372,42 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
             case '\\':          state = st_str1; break;
             case '"':
                 {
-                    // We've scanned to the end of a string.  ep is pointing
-                    // just after the '"' that is ends the string, so we have
-                    // to subtract 1.
-                    Uint len = ep - vp - strdiff - 1;
-                    if (len < ERL_ONHEAP_BIN_LIMIT) {
-                        ErlHeapBin *hb = (ErlHeapBin *) HAlloc(p, heap_bin_size(len));
-                        hb->thing_word = header_heap_bin(len);
-                        hb->size = len;
-                        chars_to_utf8((byte *) hb->data, vp, ep - 1);
+                    // We've scanned to the end of a string.  vp is pointing
+                    // to the start of the string and ep is pointing just
+                    // after the '"' that ends the string, so we have to
+                    // subtract 1.
+                    Uint ilen = ep - vp - 1;
+                    Uint olen = ilen - strdiff;
+                    // Possible optimization: If strdiff == 0 we know that the
+                    // JSON string can be copied directly into the destination
+                    // without any decoding necessary. @@
+                    if (olen < ERL_ONHEAP_BIN_LIMIT) {
+                        ErlHeapBin *hb = (ErlHeapBin *) HAlloc(p, heap_bin_size(olen));
+                        hb->thing_word = header_heap_bin(olen);
+                        hb->size = olen;
+                        (void) chars_to_utf8((byte *) hb->data, vp, ep - 1, NULL);
                         term = make_binary(hb);
+                        reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
+                        state = st_end;
                     } else {
-                        // In the future we'd like to copy long binaries in chunks.
-                        // context->result_bin = erts_bin_nrml_alloc(ep - vp - strdiff - 1);
-                        // ASSERT(context->result_bin == NULL);
-                        // context->dp = context->result_bin->orig_bytes;
-                        Binary *result_bin = erts_bin_nrml_alloc(len);
-                        chars_to_utf8((byte *) result_bin->orig_bytes, vp, ep - 1);
-                        term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
+                        Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
+                        Binary *result_bin = erts_bin_nrml_alloc(olen);
+                        if (ilen < n) {
+                            (void) chars_to_utf8((byte *) result_bin->orig_bytes, vp, ep - 1, NULL);
+                            term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
+                            reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
+                            state = st_end;
+                        } else {
+                            // Start decoding long JSON string in parts.
+                            byte *d2;
+                            vp = chars_to_utf8((byte *) result_bin->orig_bytes, vp, vp + n, &d2);
+                            WSTACK_PUSH(s, (Eterm) d2);
+                            term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
+                            reds = 0; // Yield.
+                            state = st_str_decode;
+                        }
                     }
                 }
-                state = st_end;
                 break;
             default:
                 if (unlikely(c < 0x20)) {
@@ -1594,9 +1615,28 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
                 state = st_end;
                 goto next_char;
             }
+        decode_string: {
+                Uint ilen = ep - vp - 1;
+                Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
+                byte *d1 = (byte *) WSTACK_POP(s);
+                if (ilen < n) {
+                    // Finish decoding long JSON string.
+                    vp = chars_to_utf8(d1, vp, ep - 1, NULL);
+                    reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
+                    state = st_end;
 
+                } else {
+                    // Continue decoding long JSON string.
+                    byte *d2;
+                    vp = chars_to_utf8(d1, vp, vp + n, &d2);
+                    WSTACK_PUSH(s, (Eterm) d2);
+                    reds = 0; // Yield.
+                }
+                goto check_reductions;
+            }
         } // if (0)
 
+    check_reductions:
         if (--reds <= 0) {
             *reds_arg = 0;
             ctx->state = state;
