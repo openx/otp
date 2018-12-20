@@ -1195,52 +1195,57 @@ chars_to_float(Process *p, const byte * const s, int slen)
 // the JSON character boundaries are without scanning from the beginning of
 // the JSON string.  Returns a pointer just after the last input byte decoded.
 static byte const *
-chars_to_utf8(byte *d, const byte *s, const byte * const se, byte **de)
+chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, byte **de)
 {
-    while (s < se) {
-        const int c = *s;
-        if (unlikely(c == '\\')) {
-            switch (s[1]) {
-            case '"':  *d++ = '"';  s += 2; break;
-            case '\\': *d++ = '\\'; s += 2; break;
-            case '/':  *d++ = '/';  s += 2; break;
-            case 'b':  *d++ = '\b'; s += 2; break;
-            case 'f':  *d++ = '\f'; s += 2; break;
-            case 'n':  *d++ = '\n'; s += 2; break;
-            case 'r':  *d++ = '\r'; s += 2; break;
-            case 't':  *d++ = '\t'; s += 2; break;
-            case 'u': {
-                int h0 = hexdec(s[2]);
-                int h1 = hexdec(s[3]);
-                int h2 = hexdec(s[4]);
-                int h3 = hexdec(s[5]);
-                int unicode = (h0 << 12) + (h1 << 8) + (h2 << 4) + h3;
-                s += 6;
-                if        (unicode <     0x80) {
-                    *d++ = unicode;
-                } else if (unicode <    0x800) { // 2-byte UTF-8.
-                    d[0] = 0xC0 | (unicode >>  6);
-                    d[1] = 0x80 | (unicode & 0x3F);
-                    d += 2;
-                } else { // if (unicode <  0x10000) { // 3-byte UTF-8.
-                    d[0] = 0xE0 | (unicode >> 12);
-                    d[1] = 0x80 | ((unicode >>  6) & 0x3F);
-                    d[2] = 0x80 | (unicode & 0x3F);
-                    d += 3;
-                }
-                break;
-            } // case 'u'
-            } // switch s[1]
-        } else if (c < 0x80) {
-            *d++ = c; s++;
-        } else if (c < 0xE0) {
-            memcpy(d, s, 2); d += 2; s += 2;
-        } else if (c < 0xF0) {
-            memcpy(d, s, 3); d += 3; s += 3;
-        } else if (c < 0xF5) {
-            memcpy(d, s, 4); d += 4; s += 4;
-        } else {
-            abort();
+    if (strdiff == 0) {
+        sys_memcpy(d, s, se - s);
+        s = se;
+    } else {
+        while (s < se) {
+            const int c = *s;
+            if (unlikely(c == '\\')) {
+                switch (s[1]) {
+                case '"':  *d++ = '"';  s += 2; break;
+                case '\\': *d++ = '\\'; s += 2; break;
+                case '/':  *d++ = '/';  s += 2; break;
+                case 'b':  *d++ = '\b'; s += 2; break;
+                case 'f':  *d++ = '\f'; s += 2; break;
+                case 'n':  *d++ = '\n'; s += 2; break;
+                case 'r':  *d++ = '\r'; s += 2; break;
+                case 't':  *d++ = '\t'; s += 2; break;
+                case 'u': {
+                    int h0 = hexdec(s[2]);
+                    int h1 = hexdec(s[3]);
+                    int h2 = hexdec(s[4]);
+                    int h3 = hexdec(s[5]);
+                    int unicode = (h0 << 12) + (h1 << 8) + (h2 << 4) + h3;
+                    s += 6;
+                    if        (unicode <     0x80) {
+                        *d++ = unicode;
+                    } else if (unicode <    0x800) { // 2-byte UTF-8.
+                        d[0] = 0xC0 | (unicode >>  6);
+                        d[1] = 0x80 | (unicode & 0x3F);
+                        d += 2;
+                    } else { // if (unicode <  0x10000) { // 3-byte UTF-8.
+                        d[0] = 0xE0 | (unicode >> 12);
+                        d[1] = 0x80 | ((unicode >>  6) & 0x3F);
+                        d[2] = 0x80 | (unicode & 0x3F);
+                        d += 3;
+                    }
+                    break;
+                } // case 'u'
+                } // switch s[1]
+            } else if (c < 0x80) {
+                *d++ = c; s++;
+            } else if (c < 0xE0) {
+                memcpy(d, s, 2); d += 2; s += 2;
+            } else if (c < 0xF0) {
+                memcpy(d, s, 3); d += 3; s += 3;
+            } else if (c < 0xF5) {
+                memcpy(d, s, 4); d += 4; s += 4;
+            } else {
+                abort();
+            }
         }
     }
 
@@ -1417,7 +1422,7 @@ dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *r
                         ErlHeapBin *hb = (ErlHeapBin *) HAlloc(p, heap_bin_size(olen));
                         hb->thing_word = header_heap_bin(olen);
                         hb->size = olen;
-                        (void) chars_to_utf8((byte *) hb->data, vp, ep - 1, NULL);
+                        (void) chars_to_utf8((byte *) hb->data, vp, ep - 1, strdiff, NULL);
                         term = make_binary(hb);
                         reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
                         state = st_end;
@@ -1425,14 +1430,14 @@ dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *r
                         Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
                         Binary *result_bin = erts_bin_nrml_alloc(olen);
                         if (ilen < n) {
-                            (void) chars_to_utf8((byte *) result_bin->orig_bytes, vp, ep - 1, NULL);
+                            (void) chars_to_utf8((byte *) result_bin->orig_bytes, vp, ep - 1, strdiff, NULL);
                             term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
                             reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
                             state = st_end;
                         } else {
                             // Start decoding long JSON string in parts.
                             byte *d2;
-                            vp = chars_to_utf8((byte *) result_bin->orig_bytes, vp, vp + n, &d2);
+                            vp = chars_to_utf8((byte *) result_bin->orig_bytes, vp, vp + n, strdiff, &d2);
                             WSTACK_PUSH(s, (Eterm) d2);
                             term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
                             reds = 0; // Yield.
@@ -1664,14 +1669,14 @@ dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *r
                 byte *d1 = (byte *) WSTACK_POP(s);
                 if (ilen < n) {
                     // Finish decoding long JSON string.
-                    vp = chars_to_utf8(d1, vp, ep - 1, NULL);
+                    vp = chars_to_utf8(d1, vp, ep - 1, strdiff, NULL);
                     reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
                     state = st_end;
 
                 } else {
                     // Continue decoding long JSON string.
                     byte *d2;
-                    vp = chars_to_utf8(d1, vp, vp + n, &d2);
+                    vp = chars_to_utf8(d1, vp, vp + n, strdiff, &d2);
                     WSTACK_PUSH(s, (Eterm) d2);
                     reds = 0; // Yield.
                 }
