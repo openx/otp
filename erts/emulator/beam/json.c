@@ -61,7 +61,7 @@
 
 typedef struct T2JContext_struct {
     int alive;
-    Uint flags;
+    Uint32 flags;
     byte *ep;
     Eterm obj;
     ErtsWStack wstack;
@@ -70,7 +70,7 @@ typedef struct T2JContext_struct {
 
 typedef struct J2TContext_struct {
     int alive;
-    Uint flags;
+    Uint32 flags;
     int state;
     const byte *ep;
     const byte *vp;
@@ -87,11 +87,11 @@ static Export json_to_term_trap_export;
 static BIF_RETTYPE term_to_json_trap_1(BIF_ALIST_1);
 static BIF_RETTYPE json_to_term_trap_1(BIF_ALIST_1);
 
-static Eterm erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b);
-static Eterm erts_json_to_term_int(Process *p, Eterm Json, Uint flags, Binary *context_b);
+static Eterm erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flags, Binary *context_b);
+static Eterm erts_json_to_term_int(Process *p, Eterm Json, Uint32 flags, Binary *context_b);
 
-static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg);
-static int dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg);
+static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 flags, Sint *reds_arg, Binary **result_bin_arg);
+int dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *result_term_arg);
 
 unsigned i64ToAsciiTable(char *dst, int64_t value);
 Sint json_enc_unicode(byte *d, byte *s, byte *send);
@@ -118,7 +118,8 @@ void erts_init_json(void)
 #endif
 #define TERM_TO_JSON_MAX_INITIAL_SIZE (20 * 1024 * 1024)
 
-#define JSON_USE_NIL	0x1
+#define JSON_USE_NIL		0x1
+#define JSON_RETURN_MAPS	0x2
 
 /**********************************************************************/
 
@@ -148,10 +149,9 @@ HIPE_WRAPPER_BIF_DISABLE_GC(term_to_json, 2)
 BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 {
     Process *p = BIF_P;
-    Eterm Term = BIF_ARG_1;
     Eterm Options = BIF_ARG_2;
     Sint buf_size = TERM_TO_JSON_DEFAULT_INITIAL_SIZE;
-    Uint flags = 0; // TERM_TO_JSON_DFLAGS;
+    Uint32 flags = 0;
 
     while (is_list(Options)) {
 	Eterm arg = CAR(list_val(Options));
@@ -178,7 +178,7 @@ BIF_RETTYPE term_to_json_2(BIF_ALIST_2)
 	goto error;
     }
 
-    return erts_term_to_json_int(p, Term, buf_size, flags, NULL);
+    return erts_term_to_json_int(p, BIF_ARG_1, buf_size, flags, NULL);
 }
 
 #define TERM_TO_JSON_LOOP_FACTOR TERM_TO_BINARY_LOOP_FACTOR
@@ -204,7 +204,7 @@ static int t2j_context_destructor(Binary *context_bin)
 #define JSON_DONE	2
 
 static BIF_RETTYPE
-erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags, Binary *context_b)
+erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flags, Binary *context_b)
 {
 #ifndef EXTREME_TTB_TRAPPING
     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
@@ -316,7 +316,7 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint flags,
    -1 when out of reductions. */
 
 static int
-enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg, Binary **result_bin_arg)
+enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 flags, Sint *reds_arg, Binary **result_bin_arg)
 {
     WSTACK_DECLARE(s);
     Sint reds = *reds_arg;
@@ -617,7 +617,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 dflags, Sint *reds_arg
 		ENSURE_BUFFER(4); ep[0] = 'n'; ep[1] = 'u'; ep[2] = 'l'; ep[3] = 'l'; ep += 4;
 		break;
 	    default:
-		if (dflags & JSON_USE_NIL && ERTS_IS_ATOM_STR("nil", obj)) {
+		if (flags & JSON_USE_NIL && ERTS_IS_ATOM_STR("nil", obj)) {
 		    goto encode_null;
 		}
 		goto fail;
@@ -996,8 +996,27 @@ HIPE_WRAPPER_BIF_DISABLE_GC(json_to_term, 2)
 /* erlang:json_to_term/2 entry point. */
 BIF_RETTYPE json_to_term_2(BIF_ALIST_2)
 {
-    // Second argument is currently ignored. @@
-    return erts_json_to_term_int(BIF_P, BIF_ARG_1, 0, NULL);
+    Process *p = BIF_P;
+    Eterm Options = BIF_ARG_2;
+    Uint32 flags = 0;
+
+    while (is_list(Options)) {
+	Eterm arg = CAR(list_val(Options));
+	if (ERTS_IS_ATOM_STR("return_maps", arg)) {
+	    flags |= JSON_RETURN_MAPS;
+	} else if (ERTS_IS_ATOM_STR("use_nil", arg)) {
+	    flags |= JSON_USE_NIL;
+	} else {
+	    error:
+	    BIF_ERROR(p, EXC_BADARG);
+	}
+	Options = CDR(list_val(Options));
+    }
+    if (is_not_nil(Options)) {
+	goto error;
+    }
+
+    return erts_json_to_term_int(BIF_P, BIF_ARG_1, flags, NULL);
 }
 
 static int j2t_context_destructor(Binary *context_bin)
@@ -1013,7 +1032,7 @@ static int j2t_context_destructor(Binary *context_bin)
 #define ST_INIT 0
 
 static Eterm
-erts_json_to_term_int(Process *p, Eterm Json, Uint flags, Binary *context_b)
+erts_json_to_term_int(Process *p, Eterm Json, Uint32 flags, Binary *context_b)
 {
 #ifndef EXTREME_TTB_TRAPPING
     Sint reds = (Sint) (ERTS_BIF_REDS_LEFT(p) * TERM_TO_JSON_LOOP_FACTOR);
@@ -1058,7 +1077,7 @@ erts_json_to_term_int(Process *p, Eterm Json, Uint flags, Binary *context_b)
 	context = ERTS_MAGIC_BIN_DATA(context_b);
     }
 
-    switch (dec_json_int(p, context, &reds, &result_term)) {
+    switch (dec_json_int(p, context, flags, &reds, &result_term)) {
     case JSON_YIELD: {
 	// Ran out of reductions; yield.
 	Eterm *hp;
@@ -1229,10 +1248,23 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se, byte **de)
     return s;
 }
 
-static int
-dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg)
+int
+dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *result_term_arg)
 {
+    // The s WSTACK is used to store lists and object in the process of being
+    // parsed.  For a list we have:
+    //   DEC_ARRAY 0
+    //   DEC_ARRAY elt1 1
+    //   DEC_ARRAY elt1 elt2 2
+    //   ...
+    // For an object we have:
+    //   DEC_OBJECT 0
+    //   DEC_OBJECT key1 1
+    //   DEC_OBJECT key1 val1 2
+    //   DEC_OBJECT key1 val1 key2 3
+    //   ...
     WSTACK_DECLARE(s);
+
     Sint reds = *reds_arg;
 
     int state = ctx->state;
@@ -1283,7 +1315,7 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
             case 't':           state = st_true0; break;
             case 'f':           state = st_false0; break;
             case 'n':           state = st_null0; break;
-            case '[':           state = st_init; WSTACK_PUSH2(s, DEC_ARRAY, 0); break;
+            case '[':           state = st_init; WSTACK_PUSH2(s, DEC_ARRAY , 0); break;
             case '{':           state = st_obj0; WSTACK_PUSH2(s, DEC_OBJECT, 0); break;
 	    case ']':		term = THE_NON_VALUE; goto end_list;
             case CC_WHITESPACE: SKIP_WHITESPACE(); break;
@@ -1304,7 +1336,7 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
             case ',':           term = PARSE_INT(vp, ep - 1); goto handle_comma;
             case ']':           term = PARSE_INT(vp, ep - 1); goto end_list;
             case '}':           term = PARSE_INT(vp, ep - 1); goto end_object;
-            case CC_WHITESPACE: state = st_end; term = PARSE_INT(vp, ep - 1); SKIP_WHITESPACE(); break;
+            case CC_WHITESPACE: term = PARSE_INT(vp, ep - 1); state = st_end; SKIP_WHITESPACE(); break;
 	    case EOF:		term = PARSE_INT(vp, ep);     goto done;
             default :           goto fail;
 	    }
@@ -1317,7 +1349,7 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
             case ',':           term = PARSE_INT(vp, ep - 1); goto handle_comma;
             case ']':           term = PARSE_INT(vp, ep - 1); goto end_list;
             case '}':           term = PARSE_INT(vp, ep - 1); goto end_object;
-            case CC_WHITESPACE: state = st_end; term = PARSE_INT(vp, ep - 1); SKIP_WHITESPACE(); break;
+            case CC_WHITESPACE: term = PARSE_INT(vp, ep - 1); state = st_end; SKIP_WHITESPACE(); break;
 	    case EOF:		term = PARSE_INT(vp, ep);     goto done;
             default:            goto fail;
             }
@@ -1335,7 +1367,7 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
             case ',':           term = PARSE_FLOAT(vp, ep - 1); goto handle_comma;
             case ']':           term = PARSE_FLOAT(vp, ep - 1); goto end_list;
             case '}':           term = PARSE_FLOAT(vp, ep - 1); goto end_object;
-            case CC_WHITESPACE: state = st_end; term = PARSE_FLOAT(vp, ep - 1); SKIP_WHITESPACE(); break;
+            case CC_WHITESPACE: term = PARSE_FLOAT(vp, ep - 1); state = st_end; SKIP_WHITESPACE(); break;
 	    case EOF:		term = PARSE_FLOAT(vp, ep);     goto done;
             default:            goto fail;
             }
@@ -1359,7 +1391,7 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
             case ',':           term = PARSE_FLOAT(vp, ep - 1); goto handle_comma;
             case ']':           term = PARSE_FLOAT(vp, ep - 1); goto end_list;
             case '}':           term = PARSE_FLOAT(vp, ep - 1); goto end_object;
-            case CC_WHITESPACE: state = st_end; term = PARSE_FLOAT(vp, ep - 1); SKIP_WHITESPACE(); break;
+            case CC_WHITESPACE: term = PARSE_FLOAT(vp, ep - 1); state = st_end; SKIP_WHITESPACE(); break;
 	    case EOF:		term = PARSE_FLOAT(vp, ep);     goto done;
             default:            goto fail;
             }
@@ -1572,30 +1604,37 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
 		goto next_char;
 	    }
         end_object: {
-		Eterm tail = NIL;
-		Eterm *hp;
 		Sint count;
 		if (WSTACK_ISEMPTY(s)) goto fail;
 		count = WSTACK_POP(s);
 		ASSERT(count >= 0);
 		if (count % 2 != 1)  goto fail;
 		if (WSTACK_PEEKN(s, count) != DEC_OBJECT) goto fail;
-		if (term != THE_NON_VALUE) { // NECESSARY? @@
-		    WSTACK_PUSH(s, term);
-		    count++;
-		}
-		// Create a proplist from the stack elements.
+		ASSERT(term != THE_NON_VALUE);
+		WSTACK_PUSH(s, term);
+		count++;
 		count /= 2;
-		hp = HAlloc(p, count * 5 + 2); // 3 for TUPLE2 + 2 for CONS for each element + 2 for TUPLE1 wrapper.
-		while (--count >= 0) {
-		    Eterm value = WSTACK_POP(s);
-		    Eterm key = WSTACK_POP(s);
-		    Eterm tuple = TUPLE2(hp, key, value);
-		    tail = CONS(hp + 3, tuple, tail);
-		    hp += 5;
+		{
+		    // Create a proplist from the stack elements.
+		    Eterm *hp = HAlloc(p, count * 5); // 3 for TUPLE2 + 2 for CONS for each element + 2.
+		    Eterm tail = NIL;
+		    int cc = count;
+		    while (--cc >= 0) {
+			Eterm value = WSTACK_POP(s);
+			Eterm key = WSTACK_POP(s);
+			Eterm tuple = TUPLE2(hp, key, value);
+			tail = CONS(hp + 3, tuple, tail);
+			hp += 5;
+		    }
+		    if (flags & JSON_RETURN_MAPS) {
+			term = erts_map_from_validated_list(p, tail, (Uint) count);
+		    } else {
+			// Make tuple wrapper for proplist.
+			hp = HAlloc(p, 2);
+			term = TUPLE1(hp, tail);
+		    }
 		}
 		(void) WSTACK_POP(s); // Pop the DEC_OBJECT marker.
-		term = TUPLE1(hp, tail);
 		state = st_end;
 		goto next_char;
 	    }
@@ -1606,9 +1645,13 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
 		count = WSTACK_POP(s);
 		ASSERT(count == 0);
 		if (WSTACK_PEEKN(s, 0) != DEC_OBJECT) goto fail;
-		hp = HAlloc(p, 2); // 2 for TUPLE1 wrapper.
+		if (flags & JSON_RETURN_MAPS) {
+		    term = erts_map_from_validated_list(p, NIL, 0U);
+		} else {
+		    hp = HAlloc(p, 2); // 2 for TUPLE1 wrapper.
+		    term = TUPLE1(hp, NIL);
+		}
 		(void) WSTACK_POP(s); // Pop the DEC_OBJECT marker.
-		term = TUPLE1(hp, NIL);
 		state = st_end;
 		goto next_char;
 	    }
@@ -1644,8 +1687,6 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
 	    WSTACK_SAVE(s, &ctx->wstack);
 	    return JSON_YIELD;
 	};
-
-
     } // while (1)
 
 done:
