@@ -8,7 +8,8 @@
          unicode/1, binaries/1, bigints/1,
          preencoded/1, use_nil/1, bufsize/1, errors/1,
          j2t_basic_types/1, j2t_integers/1, j2t_floats/1,
-         j2t_lists/1, j2t_objects_proplist/1, j2t_string/1, j2t_unicode/1, j2t_errors/1]).
+         j2t_lists/1, j2t_objects_proplist/1, j2t_objects_map/1,
+         j2t_string/1, j2t_unicode/1, j2t_errors/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -20,7 +21,8 @@ all() ->
      objects_proplist, objects_flatmap, objects_hamt, objects_atomkey,
      unicode, binaries, bigints, preencoded, use_nil, bufsize, errors,
      j2t_basic_types, j2t_integers, j2t_floats,
-     j2t_lists, j2t_objects_proplist, j2t_string, j2t_unicode, j2t_errors].
+     j2t_lists, j2t_objects_proplist, j2t_objects_map,
+     j2t_string, j2t_unicode, j2t_errors].
 
 groups() ->
     [].
@@ -385,6 +387,19 @@ j2t_objects_proplist(Config) when is_list(Config) ->
     {[]} = erlang:json_to_term(<<" { } ">>),
     {[{<<"a">>, 1}]} = erlang:json_to_term(<<" { \"a\" : 1 } ">>),
     {[{<<"a">>, 1}, {<<"b">>, 2}]} = erlang:json_to_term(<<" { \"a\" : 1 , \"b\" : 2 } ">>),
+    ok.
+
+j2t_objects_map(Config) when is_list(Config) ->
+    #{} = erlang:json_to_term(<<"{}">>, [return_maps]),
+    #{<<"one">> := 1} = erlang:json_to_term(<<"{\"one\":1}">>, [return_maps]),
+    #{<<"one">> := 1, <<"two">> := 2} = erlang:json_to_term(<<"{\"one\":1,\"two\":2}">>, [return_maps]),
+    #{<<"one">> := 1, <<"two">> := 2, <<"three">> := 3} = erlang:json_to_term(<<"{\"one\":1,\"two\":2,\"three\":3}">>, [return_maps]),
+    #{<<"empty">> := []} = erlang:json_to_term(<<"{\"empty\":[]}">>, [return_maps]),
+    #{<<"list">> := [1, 2, 3]} = erlang:json_to_term(<<"{\"list\":[1,2,3]}">>, [return_maps]),
+    #{<<"empty">> := #{}} = erlang:json_to_term(<<"{\"empty\":{}}">>, [return_maps]),
+    #{<<"object">> := #{<<"1">> := <<"one">>}} = erlang:json_to_term(<<"{\"object\":{\"1\":\"one\"}}">>, [return_maps]),
+    #{<<"a">> := [ 1, #{}, 2, [], 3 ], <<"b">> := #{<<"four">> := 4}} =
+        erlang:json_to_term(<<"{\"a\": [1, {}, 2, [], 3], \"b\":{\"four\": 4}}">>, [return_maps]),
     ok.
 
 j2t_string(Config) when is_list(Config) ->
