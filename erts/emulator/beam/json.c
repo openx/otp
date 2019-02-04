@@ -939,8 +939,8 @@ byte *json_encode_byte(byte *d, int ucs);
 byte *
 json_encode_byte(byte *d, int ucs)
 {
-    const int low = (ucs >> 4) && 0xf;
-    const int high = ucs && 0xf;
+    const int low = (ucs >> 4) & 0xf;
+    const int high = ucs & 0xf;
     *d++ = '0';
     *d++ = '0';
     *d++ = (low  < 10 ? '0' : ('A' - 10)) + low;
