@@ -9,8 +9,10 @@
          preencoded/1, use_nil/1, bufsize/1, errors/1,
          j2t_basic_types/1, j2t_integers/1, j2t_floats/1,
          j2t_lists/1, j2t_objects_proplist/1, j2t_objects_map/1,
-         j2t_string/1, j2t_unicode/1, j2t_errors/1]).
+         j2t_string/1, j2t_unicode/1, j2t_errors/1,
+         random_round_trip/1]).
 
+-include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 suite() -> [{ct_hooks,[ts_install_cth]},
@@ -22,7 +24,8 @@ all() ->
      unicode, binaries, bigints, preencoded, use_nil, bufsize, errors,
      j2t_basic_types, j2t_integers, j2t_floats,
      j2t_lists, j2t_objects_proplist, j2t_objects_map,
-     j2t_string, j2t_unicode, j2t_errors].
+     j2t_string, j2t_unicode, j2t_errors,
+     random_round_trip].
 
 groups() ->
     [].
@@ -509,3 +512,95 @@ j2t_errors(Config) when is_list(Config) ->
     ?assertError(badarg, erlang:json_to_term(<<"{null:1}">>)),
     ?assertError(badarg, erlang:json_to_term(<<"\"hello">>)),
     ok.
+
+-record(gen_config, {object_type :: proplist | map}).
+
+do_while(Fun, Count) -> case Fun() of true -> do_while(Fun, Count + 1); false -> Count end.
+
+random_round_trip(Config) when is_list(Config) ->
+    TimeoutSecs = case os:getenv("JSON_TIME") of false -> 10; T -> list_to_integer(T) end,
+    ct:timetrap(erlang:convert_time_unit(TimeoutSecs + 2, second, millisecond)),
+    TimeLimit = erlang:monotonic_time() + erlang:convert_time_unit(TimeoutSecs, second, native),
+
+    Count =
+        do_while(
+          fun () ->
+                  {ObjectType, DecodeOpts} =
+                      case rand:uniform() < 0.5 of
+                          true  -> {proplist, []};
+                          false -> {map, [ return_maps ]}
+                      end,
+                  EJson = gen_json(100, #gen_config{object_type = ObjectType}),
+                  ?assertEqual(EJson, erlang:json_to_term(erlang:term_to_json(EJson), DecodeOpts)),
+                  erlang:monotonic_time() < TimeLimit
+          end, 0),
+    ct:log(info, ?LOW_IMPORTANCE, "ran ~p loops in ~p sec\n", [ Count, TimeoutSecs ]),
+    ok.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+gen_utf8(0, Acc) ->
+    unicode:characters_to_binary(Acc, unicode);
+gen_utf8(Len, Acc) ->
+    case rand:uniform(16#FFFFFFFF) of
+        R when R < 16#FF000000 -> gen_utf8(Len - 1, [ 16#20    + R rem (16#80 - 16#20)         | Acc ]);
+        R when R < 16#FFF00000 -> gen_utf8(Len - 1, [ 16#80    + R rem (16#07FF - 16#80)       | Acc ]);
+        R when R < 16#FFFF0000 -> case 16#800 + R rem (16#FFFF - 16#800) of
+                                      %% Avoid range 0xD800 to 0xDFFF.
+                                      CC when CC >= 16#D800 andalso CC < 16#E000 -> C = CC - 16#8000;
+                                      C -> ok
+                                  end,
+                                  gen_utf8(Len - 1, [ C                                        | Acc ]);
+        R                      -> gen_utf8(Len - 1, [ 16#10000 + R rem (16#10FFFF - 16#100000) | Acc ])
+    end.
+
+gen_key(N) ->
+    %% Generate a StrLen that is biased toward short lengths.
+    StrLen = 3 + floor(100 * math:pow(rand:uniform(), 2.0)),
+    %% Append a character to ensure that every key is unique.
+    gen_utf8(StrLen, [ N + 48 ]).
+
+fold(_Fun, Acc={0, _}) -> Acc;
+fold(Fun, Acc) -> fold(Fun, Fun(Acc)).
+
+gen_value(N, Config, Depth) ->
+    case rand:uniform(if Depth =:= 0 -> 2; true -> 16 end) of
+        1 ->
+            %% Return a list.
+            fold(
+              fun ({NIn, Acc}) ->
+                      {NOut, Value} = gen_value(NIn, Config, Depth + 1),
+                      {NOut, [ Value | Acc ]}
+              end, {N, []});
+        2 ->
+            %% Return an object.
+            case Config of
+                #gen_config{object_type=proplist} ->
+                    {NN, KVList} =
+                        fold(
+                          fun ({NIn, Acc}) ->
+                                  {NOut, Value} = gen_value(NIn, Config, Depth + 1),
+                                  {NOut, [ {gen_key(NIn), Value} | Acc ]}
+                          end, {N, []}),
+                    {NN, {KVList}};
+                #gen_config{object_type=map} ->
+                    fold(
+                      fun ({NIn, Acc}) ->
+                              {NOut, Value} = gen_value(NIn, Config, Depth + 1),
+                              {NOut, maps:put(gen_key(NIn), Value, Acc)}
+                      end, {N, maps:new()})
+            end;
+        R when R < 8 ->
+            %% Return an integer.
+            {N - 1, rand:uniform(100000)};
+        R when R < 12 ->
+            %% Return a float.
+            {N - 1, trunc(rand:uniform() * 1.0e14) / 1.0e6};
+        _ ->
+            %% Return a string.
+            {N - 1, gen_key(N)}
+    end.
+
+gen_json(N, Config) ->
+    {0, V} = gen_value(N, Config, 0),
+    V.
