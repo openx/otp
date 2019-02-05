@@ -30,6 +30,9 @@
 
 // #define EXTREME_TTB_TRAPPING 1
 
+#define DECODE_ALL 0
+#define ENCODE_ALL 0
+
 #ifdef HAVE_CONFIG_H
 #  include "config.h"
 #endif
@@ -757,7 +760,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 flags, Sint *reds_arg,
             if (unlikely(bitsize != 0)) { goto fail; }
 
             len = binary_size(obj);
-            chunked_conversion = ctx != NULL && len > reds * TERM_TO_JSON_MEMCPY_FACTOR;
+            chunked_conversion = (! ENCODE_ALL) && ctx != NULL && len > reds * TERM_TO_JSON_MEMCPY_FACTOR;
             if (bitoffs % 8 != 0) {
                 bytes = erts_get_aligned_binary_bytes_extra(
                     obj, &aligned_alloc,
@@ -1190,16 +1193,20 @@ chars_to_float(Process *p, const byte * const s, int slen)
 }
 
 // Decodes a JSON string from s to a UTF-8 string d, stopping at se.  May copy
-// past se if se is in the middle of a JSON-encoded character.  This can
-// happen when copying a JSON string in parts, where we cannot determine where
-// the JSON character boundaries are without scanning from the beginning of
-// the JSON string.  Returns a pointer just after the last input byte decoded.
+// a few bytes past se if se is in the middle of a JSON-encoded character,
+// which can happen when copying a JSON string in parts.  Returns a pointer
+// just after the last input byte decoded.
 static byte const *
-chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, byte **de)
+chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, const byte ** const de)
 {
     if (strdiff == 0) {
-        sys_memcpy(d, s, se - s);
+        // If strdiff == 0 we know that the JSON string can be doesn't contain
+        // any Unicode escapes and thus can be copied directly into the
+        // destination without any decoding.
+        const size_t len = se - s;
+        sys_memcpy(d, s, len);
         s = se;
+        if (de != NULL) { *de = d + len; }
     } else {
         while (s < se) {
             const int c = *s;
@@ -1247,9 +1254,9 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, byte *
                 abort();
             }
         }
-    }
 
-    if (de != NULL) { *de = d; }
+        if (de != NULL) { *de = d; }
+    }
 
     return s;
 }
@@ -1415,10 +1422,8 @@ dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *r
                     // subtract 1.
                     Uint ilen = ep - vp - 1;
                     Uint olen = ilen - strdiff;
-                    // Possible optimization: If strdiff == 0 we know that the
-                    // JSON string can be copied directly into the destination
-                    // without any decoding necessary. @@
                     if (olen < ERL_ONHEAP_BIN_LIMIT) {
+                        // If the JSON string will be a heap-binary, convert immediately.
                         ErlHeapBin *hb = (ErlHeapBin *) HAlloc(p, heap_bin_size(olen));
                         hb->thing_word = header_heap_bin(olen);
                         hb->size = olen;
@@ -1427,16 +1432,18 @@ dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *r
                         reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
                         state = st_end;
                     } else {
+                        // Otherwise the JSON string will be a ref-counted binary.
                         Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
                         Binary *result_bin = erts_bin_nrml_alloc(olen);
-                        if (ilen < n) {
+                        if (DECODE_ALL || ilen < n) {
+                            // JSON string is small enough to convert immediately.
                             (void) chars_to_utf8((byte *) result_bin->orig_bytes, vp, ep - 1, strdiff, NULL);
                             term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
                             reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
                             state = st_end;
                         } else {
                             // Start decoding long JSON string in parts.
-                            byte *d2;
+                            const byte *d2;
                             vp = chars_to_utf8((byte *) result_bin->orig_bytes, vp, vp + n, strdiff, &d2);
                             WSTACK_PUSH(s, (Eterm) d2);
                             term = erts_build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), result_bin);
@@ -1672,13 +1679,13 @@ dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *r
                     vp = chars_to_utf8(d1, vp, ep - 1, strdiff, NULL);
                     reds -= ilen / TERM_TO_JSON_MEMCPY_FACTOR;
                     state = st_end;
-
                 } else {
                     // Continue decoding long JSON string.
-                    byte *d2;
+                    const byte *d2;
                     vp = chars_to_utf8(d1, vp, vp + n, strdiff, &d2);
                     WSTACK_PUSH(s, (Eterm) d2);
                     reds = 0; // Yield.
+                    // state remains st_str_decode
                 }
                 goto check_reductions;
             }
