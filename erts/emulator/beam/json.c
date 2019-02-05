@@ -93,7 +93,7 @@ static BIF_RETTYPE json_to_term_trap_1(BIF_ALIST_1);
 static Eterm erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flags, Binary *context_b);
 static Eterm erts_json_to_term_int(Process *p, Eterm Json, Uint32 flags, Binary *context_b);
 
-static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Sint *reds_arg, Binary **result_bin_arg);
+static int enc_json_int(T2JContext *ctx, Sint *reds_arg, Binary **result_bin_arg);
 int dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg);
 
 unsigned i64ToAsciiTable(char *dst, int64_t value);
@@ -218,27 +218,24 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flag
     int is_first_call;
     T2JContext context_buf;
     T2JContext *context;
-    byte *bytes;
 
     if (context_b == NULL) {
         // First call; initialize context.
         is_first_call = 1;
         context_buf.alive = 1;
         context_buf.flags = flags;
-        context_buf.ep = NULL;
-        context_buf.obj = THE_NON_VALUE;
+        context_buf.obj = Term;
         context_buf.wstack.wstart = NULL;
         context_buf.result_bin = erts_bin_nrml_alloc(initial_buf_size);
+        context_buf.ep = (byte *) context_buf.result_bin->orig_bytes;
         context = &context_buf;
     } else {
         is_first_call = 0;
         context = ERTS_MAGIC_BIN_DATA(context_b);
     }
 
-    bytes = (byte *) context->result_bin->orig_bytes;
-
     flags = context->flags;
-    switch (enc_json_int(context, Term, bytes, &reds, &context->result_bin)) {
+    switch (enc_json_int(context, &reds, &context->result_bin)) {
     case JSON_YIELD: {
         // Ran out of reductions; yield.
         Eterm *hp;
@@ -319,28 +316,26 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flag
    -1 when out of reductions. */
 
 static int
-enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Sint *reds_arg, Binary **result_bin_arg)
+enc_json_int(T2JContext *ctx, Sint *reds_arg, Binary **result_bin_arg)
 {
     WSTACK_DECLARE(s);
 
     Sint reds = *reds_arg;
 
     const Uint32 flags = ctx->flags;
+    byte *ep  = ctx->ep;
+    Eterm obj = ctx->obj;
     const byte *endp = (byte *) (*result_bin_arg)->orig_bytes + (*result_bin_arg)->orig_size;
 
     WSTACK_CHANGE_ALLOCATOR(s, ERTS_ALC_T_SAVED_ESTACK);
 
     if (ctx->wstack.wstart) { /* restore saved stacks and byte pointer */
         WSTACK_RESTORE(s, &ctx->wstack);
-        ep = ctx->ep;
-        obj = ctx->obj;
-        if (is_non_value(obj)) {
-            goto outer_loop;
-        }
     }
 
-    goto encode_term_no_reduction_check;
-
+    if (! is_non_value(obj)) {
+        goto encode_term_no_reduction_check;
+    }
 
 #define ENSURE_BUFFER(n)						\
     do {								\
