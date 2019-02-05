@@ -521,7 +521,7 @@ enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 flags, Sint *reds_arg,
             if (len > reds * TERM_TO_JSON_MEMCPY_FACTOR) {
                 Uint n = reds * TERM_TO_JSON_MEMCPY_FACTOR;
                 // Move n forward to the end of the multi-byte UTF-8 character.
-                while (IS_UTF8_CONTINUATION_BYTE(bytes[n]) && n < len) { n++; }
+                while (n < len && IS_UTF8_CONTINUATION_BYTE(bytes[n])) { n++; }
                 WSTACK_PUSH4(s, (UWord) (bytes + n), (UWord) aligned_alloc, ENC_BIN_COPY, len - n);
 
                 ENSURE_BUFFER(MAX_UTF8_EXPANSION * n);
