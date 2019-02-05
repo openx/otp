@@ -93,8 +93,8 @@ static BIF_RETTYPE json_to_term_trap_1(BIF_ALIST_1);
 static Eterm erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flags, Binary *context_b);
 static Eterm erts_json_to_term_int(Process *p, Eterm Json, Uint32 flags, Binary *context_b);
 
-static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 flags, Sint *reds_arg, Binary **result_bin_arg);
-int dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *result_term_arg);
+static int enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Sint *reds_arg, Binary **result_bin_arg);
+int dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg);
 
 unsigned i64ToAsciiTable(char *dst, int64_t value);
 Sint json_enc_unicode(byte *d, byte *s, byte *send);
@@ -238,7 +238,7 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flag
     bytes = (byte *) context->result_bin->orig_bytes;
 
     flags = context->flags;
-    switch (enc_json_int(context, Term, bytes, flags, &reds, &context->result_bin)) {
+    switch (enc_json_int(context, Term, bytes, &reds, &context->result_bin)) {
     case JSON_YIELD: {
         // Ran out of reductions; yield.
         Eterm *hp;
@@ -319,11 +319,14 @@ erts_term_to_json_int(Process *p, Eterm Term, Sint initial_buf_size, Uint32 flag
    -1 when out of reductions. */
 
 static int
-enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Uint32 flags, Sint *reds_arg, Binary **result_bin_arg)
+enc_json_int(T2JContext *ctx, Eterm obj, byte *ep, Sint *reds_arg, Binary **result_bin_arg)
 {
     WSTACK_DECLARE(s);
+
     Sint reds = *reds_arg;
-    byte *endp = (byte *) (*result_bin_arg)->orig_bytes + (*result_bin_arg)->orig_size;
+
+    const Uint32 flags = ctx->flags;
+    const byte *endp = (byte *) (*result_bin_arg)->orig_bytes + (*result_bin_arg)->orig_size;
 
     WSTACK_CHANGE_ALLOCATOR(s, ERTS_ALC_T_SAVED_ESTACK);
 
@@ -1080,7 +1083,7 @@ erts_json_to_term_int(Process *p, Eterm Json, Uint32 flags, Binary *context_b)
         context = ERTS_MAGIC_BIN_DATA(context_b);
     }
 
-    switch (dec_json_int(p, context, flags, &reds, &result_term)) {
+    switch (dec_json_int(p, context, &reds, &result_term)) {
     case JSON_YIELD: {
         // Ran out of reductions; yield.
         Eterm *hp;
@@ -1262,7 +1265,7 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, const 
 }
 
 int
-dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *result_term_arg)
+dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg)
 {
     // The s WSTACK is used to store lists and object in the process of being
     // parsed.  For a list we have:
@@ -1280,6 +1283,7 @@ dec_json_int(Process *p, J2TContext *ctx, Uint32 flags, Sint *reds_arg, Eterm *r
 
     Sint reds = *reds_arg;
 
+    const Uint32 flags = ctx->flags;
     int state = ctx->state;
     const byte *ep = ctx->ep;
     const byte *vp = ctx->vp; // Pointer to start of value currently being decoded.
