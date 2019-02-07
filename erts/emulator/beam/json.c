@@ -1207,7 +1207,7 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, const 
     } else {
         while (s < se) {
             const int c = *s;
-            if (unlikely(c == '\\')) {
+            if (c == '\\') {
                 switch (s[1]) {
                 case '"':  *d++ = '"';  s += 2; break;
                 case '\\': *d++ = '\\'; s += 2; break;
@@ -1225,15 +1225,15 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, const 
                     int unicode = (h0 << 12) + (h1 << 8) + (h2 << 4) + h3;
                     s += 6;
                     if        (unicode <     0x80) {
-                        *d++ = unicode;
+                        *d++ =         unicode;
                     } else if (unicode <    0x800) { // 2-byte UTF-8.
-                        d[0] = 0xC0 | (unicode >>  6);
-                        d[1] = 0x80 | (unicode & 0x3F);
+                        d[0] = 0xC0 | ((unicode >>  6)       );
+                        d[1] = 0x80 | ((unicode      ) & 0x3F);
                         d += 2;
                     } else { // if (unicode <  0x10000) { // 3-byte UTF-8.
-                        d[0] = 0xE0 | (unicode >> 12);
+                        d[0] = 0xE0 | ((unicode >> 12)       );
                         d[1] = 0x80 | ((unicode >>  6) & 0x3F);
-                        d[2] = 0x80 | (unicode & 0x3F);
+                        d[2] = 0x80 | ((unicode      ) & 0x3F);
                         d += 3;
                     }
                     break;
