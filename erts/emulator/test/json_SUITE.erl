@@ -3,13 +3,16 @@
 -export([all/0, suite/0, groups/0, init_per_suite/1, end_per_suite/1,
          init_per_group/2, end_per_group/2,
          init_per_testcase/2, end_per_testcase/2,
-         basic_types/1, integers/1, lists/1,
-         objects_proplist/1, objects_flatmap/1, objects_hamt/1, objects_atomkey/1,
-         unicode/1, binaries/1, bigints/1,
-         preencoded/1, use_nil/1, bufsize/1, errors/1,
-         j2t_basic_types/1, j2t_integers/1, j2t_floats/1,
-         j2t_lists/1, j2t_objects_proplist/1, j2t_objects_map/1,
-         j2t_string/1, j2t_unicode/1, j2t_errors/1,
+
+         t2j_basic_types/1, t2j_integers/1, t2j_lists/1,
+         t2j_objects_proplist/1, t2j_objects_flatmap/1, t2j_objects_hamt/1,
+         t2j_objects_atomkey/1, t2j_unicode/1, t2j_binaries/1, t2j_bigints/1,
+         t2j_preencoded/1, t2j_use_nil/1, t2j_bufsize/1, t2j_errors/1,
+
+         j2t_basic_types/1, j2t_integers/1, j2t_floats/1, j2t_lists/1,
+         j2t_objects_proplist/1, j2t_objects_map/1, j2t_string/1,
+         j2t_unicode/1, j2t_errors/1,
+
          random_round_trip/1]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -19,13 +22,12 @@ suite() -> [{ct_hooks,[ts_install_cth]},
             {timetrap,{minutes,1}}].
 
 all() ->
-    [basic_types, integers, lists,
-     objects_proplist, objects_flatmap, objects_hamt, objects_atomkey,
-     unicode, binaries, bigints, preencoded, use_nil, bufsize, errors,
-     j2t_basic_types, j2t_integers, j2t_floats,
-     j2t_lists, j2t_objects_proplist, j2t_objects_map,
-     j2t_string, j2t_unicode, j2t_errors,
-     random_round_trip].
+    [t2j_basic_types, t2j_integers, t2j_lists, t2j_objects_proplist,
+     t2j_objects_flatmap, t2j_objects_hamt, t2j_objects_atomkey, t2j_unicode,
+     t2j_binaries, t2j_bigints, t2j_preencoded, t2j_use_nil, t2j_bufsize,
+     t2j_errors, j2t_basic_types, j2t_integers, j2t_floats, j2t_lists,
+     j2t_objects_proplist, j2t_objects_map, j2t_string, j2t_unicode,
+     j2t_errors, random_round_trip].
 
 groups() ->
     [].
@@ -50,7 +52,7 @@ end_per_testcase(_Func, _Config) ->
 
 %% ts:run(emulator, json_SUITE, [ batch ]).
 
-basic_types(Config) when is_list(Config) ->
+t2j_basic_types(Config) when is_list(Config) ->
     <<"true">> = erlang:term_to_json(true),
     <<"false">> = erlang:term_to_json(false),
     <<"null">> = erlang:term_to_json(null),
@@ -59,7 +61,7 @@ basic_types(Config) when is_list(Config) ->
     <<"\"apple\"">> = erlang:term_to_json(<<"apple">>),
     ok.
 
-integers(Config) when is_list(Config) ->
+t2j_integers(Config) when is_list(Config) ->
     <<"0">> = erlang:term_to_json(0),
     <<"1">> = erlang:term_to_json(1),
     <<"-1">> = erlang:term_to_json(-1),
@@ -109,7 +111,7 @@ integers(Config) when is_list(Config) ->
     <<"990506070809">> = erlang:term_to_json(990506070809),
     ok.
 
-lists(Config) when is_list(Config) ->
+t2j_lists(Config) when is_list(Config) ->
     <<"[]">> = erlang:term_to_json([]),
     <<"[true]">> = erlang:term_to_json([true]),
     <<"[1]">> = erlang:term_to_json([1]),
@@ -121,7 +123,7 @@ lists(Config) when is_list(Config) ->
         erlang:term_to_json([1, 2, [3, 4, 5], 6, [[7]], [8, [9, [10], 11, 12]]]),
     ok.
 
-objects_proplist(Config) when is_list(Config) ->
+t2j_objects_proplist(Config) when is_list(Config) ->
     <<"{}">> = erlang:term_to_json({[]}),
     <<"{\"one\":1}">> = erlang:term_to_json({[{<<"one">>, 1}]}),
     <<"{\"one\":1,\"two\":2}">> = erlang:term_to_json({[{<<"one">>, 1}, {<<"two">>, 2}]}),
@@ -132,13 +134,13 @@ objects_proplist(Config) when is_list(Config) ->
     <<"{\"object\":{\"1\":\"one\"}}">> = erlang:term_to_json({[{<<"object">>, {[{<<"1">>,<<"one">>}]}}]}),
     ok.
 
-objects_flatmap(Config) when is_list(Config) ->
+t2j_objects_flatmap(Config) when is_list(Config) ->
     <<"{}">> = erlang:term_to_json(#{}),
     <<"{\"a\":\"apple\"}">> = erlang:term_to_json(#{<<"a">> => <<"apple">>}),
     <<"{\"a\":\"apple\",\"b\":\"banana\"}">> = erlang:term_to_json(#{<<"a">> => <<"apple">>, <<"b">> => <<"banana">>}),
     ok.
 
-objects_hamt(Config) when is_list(Config) ->
+t2j_objects_hamt(Config) when is_list(Config) ->
     %% The map implementation switches to HAMT at 32 elements.
     MakeMapFun =
         fun (Values) ->
@@ -180,7 +182,7 @@ objects_hamt(Config) when is_list(Config) ->
 
     ok.
 
-objects_atomkey(Config) when is_list(Config) ->
+t2j_objects_atomkey(Config) when is_list(Config) ->
     <<"{\"a\":\"apple\"}">> = erlang:term_to_json({[{a, <<"apple">>}]}),
     <<"{\"1\":\"one\"}">> = erlang:term_to_json({[{'1', <<"one">>}]}),
     Ole = <<"¡olé!"/utf8>>,
@@ -188,7 +190,7 @@ objects_atomkey(Config) when is_list(Config) ->
     <<"{\"a\":\"apple\"}">> = erlang:term_to_json(#{a => <<"apple">>}),
     ok.
 
-unicode(Config) when is_list(Config) ->
+t2j_unicode(Config) when is_list(Config) ->
     <<"\"\\u0000\"">> = erlang:term_to_json(list_to_binary([0])),
     <<"\"\\b\"">> = erlang:term_to_json(<<"\b">>),
     <<"\"\\n\"">> = erlang:term_to_json(<<"\n">>),
@@ -235,10 +237,32 @@ unicode(Config) when is_list(Config) ->
     <<"\"\\u001D\"">> = erlang:term_to_json(list_to_binary([29])),
     <<"\"\\u001E\"">> = erlang:term_to_json(list_to_binary([30])),
     <<"\"\\u001F\"">> = erlang:term_to_json(list_to_binary([31])),
+    <<"\" \"">>       = erlang:term_to_json(list_to_binary([32])),
+    <<"\"~\"">>       = erlang:term_to_json(list_to_binary([126])),
     <<"\"\\u007F\"">> = erlang:term_to_json(list_to_binary([127])),
+    <<34,194,128,34>> = erlang:term_to_json(unicode:characters_to_binary([ 16#80 ])),
+    <<34,223,191,34>> = erlang:term_to_json(unicode:characters_to_binary([ 16#07FF ])),
+    <<34,224,160,128,34>> = erlang:term_to_json(unicode:characters_to_binary([ 16#0800 ])),
+    <<34,239,191,191,34>> = erlang:term_to_json(unicode:characters_to_binary([ 16#FFFF ])),
+    <<34,240,144,128,128,34>> = erlang:term_to_json(unicode:characters_to_binary([ 16#10000 ])),
+    <<34,244,143,191,191,34>> = erlang:term_to_json(unicode:characters_to_binary([ 16#10FFFF ])),
+    %% Code point U+110000 is too high and should fail, but doesn't:
+    <<34,244,144,128,128,34>> == erlang:term_to_json(<<16#F4, 16#90, 16#80, 16#80>>),
+    %% Inputs that with characters in the range 0xF5 to 0xFF produce errors.
+    ?assertError(badarg, erlang:term_to_json(<<16#F5, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#F6, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#F7, 16#BF, 16#BF, 16#BF>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#F8, 16#80, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#F9, 16#80, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#FA, 16#80, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#FB, 16#80, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#FC, 16#80, 16#80, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#FD, 16#80, 16#80, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#FE, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80>>)),
+    ?assertError(badarg, erlang:term_to_json(<<16#FF, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80>>)),
     ok.
 
-binaries(Config) when is_list(Config) ->
+t2j_binaries(Config) when is_list(Config) ->
     %% Encode an aligned sub-binary.
     <<_:5/binary, Str1:5/binary, _:5/binary>> = <<"abcdefghijklmno">>,
     <<"\"fghij\"">> = erlang:term_to_json(Str1),
@@ -258,12 +282,12 @@ binaries(Config) when is_list(Config) ->
 
     ok.
 
-bigints(Config) when is_list(Config) ->
+t2j_bigints(Config) when is_list(Config) ->
     <<"1208925819614629174706176">> = erlang:term_to_json(1 bsl 80),
     <<"-604462909807314587353088">> = erlang:term_to_json(- 1 bsl 79),
     ok.
 
-preencoded(Config) when is_list(Config) ->
+t2j_preencoded(Config) when is_list(Config) ->
     <<"test">> = erlang:term_to_json({json, <<"test">>}),
     <<"[1]">> = erlang:term_to_json([{json, <<"1">>}]),
     <<"[1,2,3]">> = erlang:term_to_json([{json, <<"1,2,3">>}]),
@@ -281,14 +305,14 @@ preencoded(Config) when is_list(Config) ->
     ?assertEqual(LongBinaryExpect, LongBinaryActual),
     ok.
 
-use_nil(Config) when is_list(Config) ->
+t2j_use_nil(Config) when is_list(Config) ->
     <<"null">> = erlang:term_to_json(nil, [ use_nil ]),
     <<"{\"obj\":null}">> = erlang:term_to_json({[ {<<"obj">>, nil} ]}, [ use_nil ]),
     <<"{\"obj\":null}">> = erlang:term_to_json(#{<<"obj">> => nil}, [ use_nil ]),
     <<"[null]">> = erlang:term_to_json([ nil ], [ use_nil ]),
     ok.
 
-bufsize(Config) when is_list(Config) ->
+t2j_bufsize(Config) when is_list(Config) ->
     LongBinary = list_to_binary([$\", lists:duplicate(1000, <<"0123456789">>), $\"]),
     IntList = lists:seq(1, 100),
     IntListJson = list_to_binary([ $[, lists:join($,, [ integer_to_binary(N) || N <- IntList ]), $] ]),
@@ -299,7 +323,7 @@ bufsize(Config) when is_list(Config) ->
       end, lists:seq(1, 127, 2)),
     ok.
 
-errors(Config) when is_list(Config) ->
+t2j_errors(Config) when is_list(Config) ->
     ?assertError(badarg, erlang:term_to_json(a)),
     ?assertError(badarg, erlang:term_to_json([ 1 | 2 ])),
     ?assertError(badarg, erlang:term_to_json({[true]})),
@@ -464,30 +488,48 @@ j2t_unicode(Config) when is_list(Config) ->
         unicode:characters_to_list(erlang:json_to_term(<<"\"\\u3210\\u7654\\uba98\\ufedc\\uABCD\\u00EF\"">>), utf8),
 
     %% two-byte utf8
-    [ 16#80, 16#7FF ] =
-        unicode:characters_to_list(erlang:json_to_term(<<$",
-                                                         16#C2, 16#80,
-                                                         16#DF, 16#BF,
-                                                         $">>)),
+    ?assertEqual([ 16#80 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#C2, 16#80, $">>))),
+    ?assertEqual([ 16#7FF ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#DF, 16#BF, $">>))),
+
     %% three-byte utf8
-    [ 16#800, 16#2640, 16#FFFF ] =
-        unicode:characters_to_list(erlang:json_to_term(<<$",
-                                                         16#E0, 16#A0, 16#80,
-                                                         16#E2, 16#99, 16#80,
-                                                         16#EF, 16#BF, 16#BF,
-                                                         $">>)),
+    ?assertEqual([ 16#800 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#E0, 16#A0, 16#80, $">>))),
+    ?assertEqual([ 16#2640 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#E2, 16#99, 16#80, $">>))),
+    ?assertEqual([ 16#FFFF ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#EF, 16#BF, 16#BF, $">>))),
+
     %% four-byte utf8
-    [ 16#10000, 16#10FFFF ] =
-        unicode:characters_to_list(erlang:json_to_term(<<$",
-                                                         16#F0, 16#90, 16#80, 16#80,
-                                                         16#F4, 16#8F, 16#BF, 16#BF,
-                                                         $">>)),
+    ?assertEqual([ 16#10000 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#F0, 16#90, 16#80, 16#80, $">>))),
+    ?assertEqual([ 16#10FFFF ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#F4, 16#8F, 16#BF, 16#BF, $">>))),
+    %% Code point U-110000 is too high.
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#F4, 16#90, 16#80, 16#80, $">>)),
+    %% 0xF5 - 0xF7 would start other 4-byte utf8 code points that are too high.
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#F5, 16#80, 16#80, 16#80, $">>)),
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#F7, 16#BF, 16#BF, 16#BF, $">>)),
+    %% 0xF8 - 0xFB would start 5-byte code points, if they were allowed.
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#F8, 16#80, 16#80, 16#80, 16#80, $">>)),
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#FB, 16#80, 16#80, 16#80, 16#80, $">>)),
+    %% 0xFC and 0xFD would start 6-byte code points, if they were allowed.
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#FC, 16#80, 16#80, 16#80, 16#80, 16#80, $">>)),
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#FD, 16#80, 16#80, 16#80, 16#80, 16#80, $">>)),
+    %% 0xFE would start 7-byte code points, if it was allowed.
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#FE, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80, $">>)),
+    %% There's not really a sequence that follows the pattern that begins with 0xFF.
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#FF, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80, $">>)),
+
+    %% U+FFFF and U+FFEE are allowed.
+    ?assertEqual([ 16#FFFF, 16#FFFE ],
+                 unicode:characters_to_list(
+                   erlang:json_to_term(<<"\"\\uFFFF\\uFFFE\"">>))),
+    ?assertEqual([ 16#FFFF, 16#FFFE ],
+                 unicode:characters_to_list(
+                   erlang:json_to_term(<<"\"", (unicode:characters_to_binary([ 16#FFFF, 16#FFFE ]))/binary, "\"">>))),
+
     %% bad utf-8
     ?assertError(badarg, erlang:json_to_term(<<$", 16#80, $">>)),
     ?assertError(badarg, erlang:json_to_term(<<$", 16#BF, $">>)),
     ?assertError(badarg, erlang:json_to_term(<<$", 16#C0, $">>)),
-    %% ?assertError(badarg, erlang:json_to_term(<<34, 16#C1, 16#81, 34>>)), % long encoding for "A"
-    <<16#C1, 16#81>> = erlang:json_to_term(<<34, 16#C1, 16#81, 34>>), % long encoding for "A" should be rejected
+    ?assertError(badarg, erlang:json_to_term(<<34, 16#C1, 16#81, 34>>)), % long encoding for "A"
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#E0, 16#9F, 16#BF, $">>)), % long three-byte encoding
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#F0, 16#8F, 16#BF, 16#BF, $">>)), % long four-byte encoding
     ?assertError(badarg, erlang:json_to_term(<<$", 16#C2, $">>)), % missing continuation byte
     ?assertError(badarg, erlang:json_to_term(<<$", 16#C2, 16#7F, $">>)), % bad continuation byte
     ok.

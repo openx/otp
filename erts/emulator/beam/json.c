@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2018. All Rights Reserved.
+ * Copyright 2019, OpenX Technologies. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,14 +18,10 @@
  * %CopyrightEnd%
  */
 
-/* Conversion to JSON format.
+/* Conversion between Erlang terms and JSON format.
  *
- * This code is derived from the external term format conversion code in
- * external.c, and reuses some of the data structures defined by that code,
- * notably TTBEncode.  ETF construction has three phases (determining the
- * binary size, encoding, and compressing) but JSON construction does not have
- * compression, and grows the output binary as necessary instead of making a
- * separate pass over the input first to calculate the size.
+ * This code is modeled after the external term format conversion code in
+ * external.c
  */
 
 // #define EXTREME_TTB_TRAPPING 1
@@ -1462,17 +1458,25 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
                 } else if (c < 0xE0) {
                     if (unlikely(ep + 1 >= endp)) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
+                    // These shortest-encoding checks taken from Jiffy by Paul J. Davis.
+                    if (unlikely((c & 0x1E) == 0))          goto fail;
                     ep += 1;
                 } else if (c < 0xF0) {
                     if (unlikely(ep + 2 >= endp)) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[1]))) goto fail;
+                    if (unlikely((c & 0x0F) + (ep[0] & 0x20) == 0)) goto fail;
                     ep += 2;
                 } else if (c < 0xF5) {
                     if (unlikely(ep + 3 >= endp)) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[1]))) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[2]))) goto fail;
+                    if (unlikely((c & 0x07) + (ep[0] & 0x30) == 0)) goto fail;
+                    if (unlikely(((c     & 0x07) << 18) +
+                                 ((ep[0] & 0x3F) << 12) +
+                                 ((ep[1] & 0x3F) <<  6) +
+                                 ((ep[2] & 0x3F)) >= 0x110000)) goto fail;
                     ep += 3;
                 } else {
                     goto fail;
