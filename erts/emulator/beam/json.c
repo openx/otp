@@ -1458,25 +1458,36 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
                 } else if (c < 0xE0) {
                     if (unlikely(ep + 1 >= endp)) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
-                    // These shortest-encoding checks taken from Jiffy by Paul J. Davis.
+                    // Reject overlong encoding (from Jiffy by Paul J. Davis).
                     if (unlikely((c & 0x1E) == 0))          goto fail;
                     ep += 1;
                 } else if (c < 0xF0) {
+                    int u;
                     if (unlikely(ep + 2 >= endp)) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[1]))) goto fail;
+                    // Reject overlong encoding.
                     if (unlikely((c & 0x0F) + (ep[0] & 0x20) == 0)) goto fail;
+                    // Reject surrogate pairs in the range 0xD800 to 0xDFFF.
+                    u = ((c     & 0x0F) << 12) +
+                        ((ep[0] & 0x3F) <<  6) +
+                        ((ep[1] & 0x3F)      );
+                    if (unlikely(u >= 0xD800 && u < 0xE000)) goto fail;
                     ep += 2;
                 } else if (c < 0xF5) {
+                    int u;
                     if (unlikely(ep + 3 >= endp)) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[0]))) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[1]))) goto fail;
                     if (unlikely(! IS_CONTINUATION(ep[2]))) goto fail;
+                    // Reject overlong encoding.
                     if (unlikely((c & 0x07) + (ep[0] & 0x30) == 0)) goto fail;
-                    if (unlikely(((c     & 0x07) << 18) +
-                                 ((ep[0] & 0x3F) << 12) +
-                                 ((ep[1] & 0x3F) <<  6) +
-                                 ((ep[2] & 0x3F)) >= 0x110000)) goto fail;
+                    // Reject code points above 0x10FFFF.
+                    u = ((c     & 0x07) << 18) +
+                        ((ep[0] & 0x3F) << 12) +
+                        ((ep[1] & 0x3F) <<  6) +
+                        ((ep[2] & 0x3F)      );
+                    if (unlikely(u >= 0x110000)) goto fail;
                     ep += 3;
                 } else {
                     goto fail;
