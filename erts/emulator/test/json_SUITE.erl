@@ -425,7 +425,7 @@ j2t_lists(Config) when is_list(Config) ->
     [true, 2, <<"three">>] = erlang:json_to_term(<<"[true,2,\"three\"]">>),
     [1, 2, [3, 4, 5], 6, [[7]], [8, [9, [10], 11, 12]]] =
         erlang:json_to_term(<<"[1,2,[3,4,5],6,[[7]],[8,[9,[10],11,12]]]">>),
-    %% whitespace skipping
+    %% Whitespace skipping.
     [] = erlang:json_to_term(<<" [ ] ">>),
     [1] = erlang:json_to_term(<<" [ 1 ] ">>),
     [1, 2] = erlang:json_to_term(<<" [ 1 , 2 ] ">>),
@@ -440,7 +440,7 @@ j2t_objects_proplist(Config) when is_list(Config) ->
     {[{<<"list">>, [1, 2, 3]}]} = erlang:json_to_term(<<"{\"list\":[1,2,3]}">>),
     {[{<<"empty">>, {[]}}]} = erlang:json_to_term(<<"{\"empty\":{}}">>),
     {[{<<"object">>, {[{<<"1">>,<<"one">>}]}}]} = erlang:json_to_term(<<"{\"object\":{\"1\":\"one\"}}">>),
-    %% whitespace skipping.
+    %% Whitespace skipping.
     {[]} = erlang:json_to_term(<<" { } ">>),
     {[{<<"a">>, 1}]} = erlang:json_to_term(<<" { \"a\" : 1 } ">>),
     {[{<<"a">>, 1}, {<<"b">>, 2}]} = erlang:json_to_term(<<" { \"a\" : 1 , \"b\" : 2 } ">>),
@@ -485,21 +485,22 @@ j2t_unicode(Config) when is_list(Config) ->
     [ 16#3210, 16#7654, 16#BA98, 16#FEDC, 16#ABCD, 16#00EF ] =
         unicode:characters_to_list(erlang:json_to_term(<<"\"\\u3210\\u7654\\uba98\\ufedc\\uABCD\\u00EF\"">>), utf8),
 
-    %% two-byte utf8
+    %% Two-byte UTF-8.
     ?assertEqual([ 16#80 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#C2, 16#80, $">>))),
     ?assertEqual([ 16#7FF ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#DF, 16#BF, $">>))),
 
-    %% three-byte utf8
+    %% Three-byte UTF-8.
     ?assertEqual([ 16#800 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#E0, 16#A0, 16#80, $">>))),
     ?assertEqual([ 16#2640 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#E2, 16#99, 16#80, $">>))),
     ?assertEqual([ 16#FFFF ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#EF, 16#BF, 16#BF, $">>))),
 
-    %% four-byte utf8
+    %% Four-byte UTF-8.
     ?assertEqual([ 16#10000 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#F0, 16#90, 16#80, 16#80, $">>))),
     ?assertEqual([ 16#10FFFF ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#F4, 16#8F, 16#BF, 16#BF, $">>))),
-    %% Code point U-110000 is too high.
+
+    %% Code point U+110000 is too high.
     ?assertError(badarg, erlang:json_to_term(<<$", 16#F4, 16#90, 16#80, 16#80, $">>)),
-    %% 0xF5 - 0xF7 would start other 4-byte utf8 code points that are too high.
+    %% 0xF5 - 0xF7 would start other 4-byte UTF-8 code points that are too high.
     ?assertError(badarg, erlang:json_to_term(<<$", 16#F5, 16#80, 16#80, 16#80, $">>)),
     ?assertError(badarg, erlang:json_to_term(<<$", 16#F7, 16#BF, 16#BF, 16#BF, $">>)),
     %% 0xF8 - 0xFB would start 5-byte code points, if they were allowed.
@@ -513,15 +514,21 @@ j2t_unicode(Config) when is_list(Config) ->
     %% There's not really a sequence that follows the pattern that begins with 0xFF.
     ?assertError(badarg, erlang:json_to_term(<<$", 16#FF, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80, 16#80, $">>)),
 
-    %% U+FFFF and U+FFEE are allowed.
-    ?assertEqual([ 16#FFFF, 16#FFFE ],
+    %% U+FFFF, U+FFFE, and U+FFFD are allowed.
+    ?assertEqual([ 16#FFFF, 16#FFFE, 16#FFFD ],
                  unicode:characters_to_list(
-                   erlang:json_to_term(<<"\"\\uFFFF\\uFFFE\"">>))),
-    ?assertEqual([ 16#FFFF, 16#FFFE ],
+                   erlang:json_to_term(<<"\"\\uFFFF\\uFFFE\\uFFFD\"">>))),
+    ?assertEqual([ 16#FFFF, 16#FFFE, 16#FFFD ],
                  unicode:characters_to_list(
-                   erlang:json_to_term(<<"\"", (unicode:characters_to_binary([ 16#FFFF, 16#FFFE ]))/binary, "\"">>))),
+                   erlang:json_to_term(<<"\"", (unicode:characters_to_binary([ 16#FFFF, 16#FFFE, 16#FFFD ]))/binary, "\"">>))),
 
-    %% bad utf-8
+    %% UTF-16 surrogate pairs.
+    ?assertEqual(<<237,159,191>>, erlang:json_to_term(<<$", 16#ED, 16#9F, 16#BF, $">>)), % U+D7FF: OK, below range
+    ?assertError(badarg,          erlang:json_to_term(<<$", 16#ED, 16#A0, 16#80, $">>)), % U+D800: fails
+    ?assertError(badarg,          erlang:json_to_term(<<$", 16#ED, 16#BF, 16#BF, $">>)), % U+DFFF: fails
+    ?assertEqual(<<238,128,128>>, erlang:json_to_term(<<$", 16#EE, 16#80, 16#80, $">>)), % U+E000: OK, above range
+
+    %% Bad UTF-8.
     ?assertError(badarg, erlang:json_to_term(<<$", 16#80, $">>)),
     ?assertError(badarg, erlang:json_to_term(<<$", 16#BF, $">>)),
     ?assertError(badarg, erlang:json_to_term(<<$", 16#C0, $">>)),
@@ -547,6 +554,8 @@ j2t_errors(Config) when is_list(Config) ->
 
 -record(gen_config, {object_type :: proplist | map}).
 
+%% Keep calling the function `Fun' as long as it returns `true'.  When it
+%% returns `false', return the number of times `Fun' was called.
 do_while(Fun, Count) -> case Fun() of true -> do_while(Fun, Count + 1); false -> Count end.
 
 random_round_trip(Config) when is_list(Config) ->
@@ -571,6 +580,7 @@ random_round_trip(Config) when is_list(Config) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+%% Generate a random UTF-8 binary.
 gen_utf8(0, Acc) ->
     unicode:characters_to_binary(Acc, unicode);
 gen_utf8(Len, Acc) ->
@@ -578,7 +588,7 @@ gen_utf8(Len, Acc) ->
         R when R < 16#FF000000 -> gen_utf8(Len - 1, [ 16#20    + R rem (16#80 - 16#20)         | Acc ]);
         R when R < 16#FFF00000 -> gen_utf8(Len - 1, [ 16#80    + R rem (16#07FF - 16#80)       | Acc ]);
         R when R < 16#FFFF0000 -> case 16#800 + R rem (16#FFFF - 16#800) of
-                                      %% Avoid range 0xD800 to 0xDFFF.
+                                      %% Avoid surrogate pair range 0xD800 to 0xDFFF.
                                       CC when CC >= 16#D800 andalso CC < 16#E000 -> C = CC - 16#8000;
                                       C -> ok
                                   end,
@@ -586,10 +596,12 @@ gen_utf8(Len, Acc) ->
         R                      -> gen_utf8(Len - 1, [ 16#10000 + R rem (16#10FFFF - 16#100000) | Acc ])
     end.
 
+%% Generate a random unique binary for use as an object key.
 gen_key(N) ->
     %% Generate a StrLen that is biased toward short lengths.
     StrLen = 3 + floor(100 * math:pow(rand:uniform(), 2.0)),
-    %% Append a character to ensure that every key is unique.
+    %% Append a character to ensure that every key is unique.  We don't want
+    %% the test to fail because of a key collision.
     gen_utf8(StrLen, [ N + 48 ]).
 
 fold(_Fun, Acc={0, _}) -> Acc;
