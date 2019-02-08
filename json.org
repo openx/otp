@@ -74,12 +74,13 @@ The BIFs convert between UTF-8-encoded Erlang binaries and JSON strings.
 It does not validate that Unicode characters are encoded in their shortest
 representation, for example.
 
-=erlang:json_to_term= is more careful.
+=erlang:json_to_term= is more careful, and invalid UTF-8 throws a badarg
+error.
 
 *** Differences From Other Implementations
 
-=erlang:json_to_term= does not support jiffy's =copy_strings= option.
-JSON strings are never returned as sub-binaries of the input.
+=erlang:json_to_term= does not support jiffy's =copy_strings= option.  It's
+not needed, as JSON strings are never returned as sub-binaries of the input.
 
 =erlang:term_to_json= does not support jiffy's =uescape= option to escape
 multi-byte UTF8 sequences to produce 7-bit output.
@@ -177,18 +178,23 @@ interpolate it into another list you can end up with something like
 The BIFs do not insist [[https://tools.ietf.org/html/rfc4627#section-2][as per rfc4627]] that only an object or array is allowed
 as the base value in a JSON text.
 
-=erlang:term_to_json= does not support pretty-printing of the JSON output.
+=erlang:term_to_json= does not support pretty-printing of the JSON output, as
+jiffy does with its =pretty= option or EEP-0018 does with its ={space, N}= and
+={indent, N}= options.
 
-* Implementation
+* Implementation Notes
+
+Both =erlang:term_to_json= and =erlang:json_to_term= are well-behaved, and
+yield regularly to allow other processes to run.
 
 =erlang:term_to_json= uses a buffer-doubling technique and converts its input
 to JSON in a single pass, then shrinks the output to its actual size at the
-end.  This is simpler than the approach taken by =term_to_binary=, which makes
-an initial pass to determine the size of the output before allocating the
-buffer, and is probably faster, but it does take more memory.  In particular
-when encoding a binary to a JSON string it ensures that six times the size of
-the binary is available (although it does the conversion in chunks, which
-limits how much excess memory is allocated).
+end.  This is simpler and probably faster than the approach taken by
+=term_to_binary=, which makes an initial pass to determine the size of the
+output before allocating the buffer, but it does take more memory.  In
+particular when encoding a binary to a JSON string it ensures that six times
+the size of the binary is available (although it does the conversion in
+chunks, which limits how much extra memory is allocated).
 
 =erlang:term_to_json= takes an =min_buf_size= option to set the initial buffer
 size; this is similar to =spawn_opt='s =min_heap_size= option.
@@ -200,18 +206,22 @@ average, about 5 times faster than the next fastest JSON library (usually
 jiffy).  The =erlang:json_to_term= BIF is, on average, about 2 to 3 times
 faster than the next fastest JSON library (also usually jiffy).  Jiffy is very
 close to =erlang:json_to_term= on a few benchmarks that test decoding strings,
-and beats it on the "Issue 90" and "UTF-8 escaped" benchmarks; I believe this
-is because jiffy doesn't yield in the middle of decoding a long string.
+and Jiffy beats it on the "Issue 90" and "UTF-8 escaped" benchmarks; I believe
+this is because jiffy doesn't yield in the middle of decoding a long string.
 
-The [[https://github.com/iskra/jsonx][jsonx]] library is very fast but it is very memory intensive when encoding,
-and it caused the Erlang VM to be killed by the OOM killer for many of the
-tests.  It also does not yield.
+The [[https://github.com/iskra/jsonx][jsonx]] library is very fast but does not yield and is very memory intensive
+when encoding, and it caused my Erlang VM to be killed by the OOM killer for
+many of the benchmarks when I attempted to include it.  For the encoding
+benchmarks that I was able to run, =erlang:term_to_json= was 2x or more faster
+than =jsonx:encode=.  For decoding, =jsonx:decode= was overall as fast as
+=erlang:json_to_term=, and on some individual benchmarks was as much as 1.6x
+faster.
 
 The "BIFs" lines in the results below are this code.  I ran these benchmarks
 in a VirtualBox VM on my Late 2013 MacBook Pro.
 
 #+begin_example
-Operating System: Linux"
+Operating System: Linux
 CPU Information: Intel(R) Core(TM) i7-4750HQ CPU @ 2.00GHz
 Number of Available Cores: 2
 Available memory: 1.96 GB
