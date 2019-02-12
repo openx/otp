@@ -1227,11 +1227,29 @@ chars_to_utf8(byte *d, const byte *s, const byte * const se, int strdiff, const 
                         d[0] = 0xC0 | ((unicode >>  6)       );
                         d[1] = 0x80 | ((unicode      ) & 0x3F);
                         d += 2;
-                    } else { // if (unicode <  0x10000) { // 3-byte UTF-8.
+                    } else if (unicode < 0xD800 || unicode >= 0xE000) { // 3-byte UTF-8.
                         d[0] = 0xE0 | ((unicode >> 12)       );
                         d[1] = 0x80 | ((unicode >>  6) & 0x3F);
                         d[2] = 0x80 | ((unicode      ) & 0x3F);
                         d += 3;
+                    } else { // unicode < 0xDC00 == 4-byte UTF-8
+                        int h4, h5, h6, h7, ulow;
+                        ASSERT(unicode >= 0xD800 && unicode < 0xDC00);
+                        ASSERT(s[0] == '\\');
+                        ASSERT(s[1] == 'u');
+                        h4 = hexdec(s[2]);
+                        h5 = hexdec(s[3]);
+                        h6 = hexdec(s[4]);
+                        h7 = hexdec(s[5]);
+                        ulow = (h4 << 12) + (h5 << 8) + (h6 << 4) + h7;
+                        ASSERT(ulow >= 0xDC00 && ulow < 0xE000);
+                        unicode = 0x10000 + ((unicode & 0x03FF) << 10) + (ulow & 0x03FF);
+                        s += 6;
+                        d[0] = 0xF0 | ((unicode >> 18) & 0x07);
+                        d[1] = 0x80 | ((unicode >> 12) & 0x3F);
+                        d[2] = 0x80 | ((unicode >>  6) & 0x3F);
+                        d[3] = 0x80 | ((unicode      ) & 0x3F);
+                        d += 4;
                     }
                     break;
                 } // case 'u'
@@ -1506,15 +1524,35 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
                 h1 = hexdec(ep[1]);
                 h2 = hexdec(ep[2]);
                 h3 = hexdec(ep[3]);
-                if (unlikely(h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0)) goto fail;
+                if (unlikely(h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0)) { goto fail; }
                 unicode = (h0 << 12) + (h1 << 8) + (h2 << 4) + h3;
                 ep += 4;
                 state = st_str0;
-                if      (unicode <     0x80) { strdiff += (6 - 1); } // 1-byte UTF-8.
-                else if (unicode <    0x800) { strdiff += (6 - 2); } // 2-byte UTF-8.
-                else if (unicode <  0x10000) { strdiff += (6 - 3); } // 3-byte UTF-8.
-                // else if (unicode < 0x110000) { strdiff += (6 - 4); } // 4-byte UTF-8.
-                else                         { goto fail; }
+                if      (unicode <   0x80) { strdiff += (6 - 1); } // 1-byte UTF-8.
+                else if (unicode <  0x800) { strdiff += (6 - 2); } // 2-byte UTF-8.
+                else if (unicode < 0xD800 || unicode >= 0xE000) {
+                    strdiff += (6 - 3); }                          // 3-byte UTF-8.
+                else if (unicode < 0xDC00) {
+                    // Check for an escaped UTF-16 surrogate pair.  If the
+                    // value we just decoded is in the range 0xD800 to 0xDBFF
+                    // it is the first half of a surrogate pair.  In that
+                    // case, validate that the second half is another escape
+                    // sequence that decodes to a value in the range 0xDC00 to
+                    // 0xDFFF.
+                    int h4, h5, h6, h7, ulow;
+                    if (unlikely(ep + 6 >= endp)) { goto fail; }
+                    if (unlikely(ep[0] != '\\'))  { goto fail; }
+                    if (unlikely(ep[1] != 'u'))   { goto fail; }
+                    h4 = hexdec(ep[2]);
+                    h5 = hexdec(ep[3]);
+                    h6 = hexdec(ep[4]);
+                    h7 = hexdec(ep[5]);
+                    if (unlikely(h4 < 0 || h5 < 0 || h6 < 0 || h7 < 0)) { goto fail; }
+                    ulow = (h4 << 12) + (h5 << 8) + (h6 << 4) + h7;
+                    if (unlikely(ulow < 0xDC00 || ulow >= 0xE000)) { goto fail; }
+                    ep += 6;
+                    strdiff += (12 - 4);                           // 4-byte UTF-8.
+                } else { goto fail; }
                 break;
             } // case 'u'
             default:

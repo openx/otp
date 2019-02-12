@@ -11,7 +11,7 @@
 
          j2t_basic_types/1, j2t_integers/1, j2t_floats/1, j2t_lists/1,
          j2t_objects_proplist/1, j2t_objects_map/1, j2t_string/1,
-         j2t_unicode/1, j2t_errors/1,
+         j2t_escapes/1, j2t_unicode/1, j2t_errors/1,
 
          random_round_trip/1]).
 
@@ -26,8 +26,8 @@ all() ->
      t2j_objects_flatmap, t2j_objects_hamt, t2j_objects_atomkey, t2j_unicode,
      t2j_binaries, t2j_bigints, t2j_preencoded, t2j_use_nil, t2j_bufsize,
      t2j_errors, j2t_basic_types, j2t_integers, j2t_floats, j2t_lists,
-     j2t_objects_proplist, j2t_objects_map, j2t_string, j2t_unicode,
-     j2t_errors, random_round_trip].
+     j2t_objects_proplist, j2t_objects_map, j2t_string, j2t_escapes,
+     j2t_unicode, j2t_errors, random_round_trip].
 
 groups() ->
     [].
@@ -473,7 +473,7 @@ j2t_string(Config) when is_list(Config) ->
     ?assertEqual(<<"abcde", L2/binary>>, erlang:json_to_term(<<34, "abcde", L1/binary, 34>>)),
     ok.
 
-j2t_unicode(Config) when is_list(Config) ->
+j2t_escapes(Config) when is_list(Config) ->
     <<0>> = erlang:json_to_term(<<"\"\\u0000\"">>),
     <<"\b">> = erlang:json_to_term(<<"\"\\b\"">>),
     <<"\n">> = erlang:json_to_term(<<"\"\\n\"">>),
@@ -487,6 +487,33 @@ j2t_unicode(Config) when is_list(Config) ->
     [ 16#3210, 16#7654, 16#BA98, 16#FEDC, 16#ABCD, 16#00EF ] =
         unicode:characters_to_list(erlang:json_to_term(<<"\"\\u3210\\u7654\\uba98\\ufedc\\uABCD\\u00EF\"">>), utf8),
 
+    ?assertError(badarg, erlang:json_to_term(<<$", 0, $">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\x\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u1\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u12\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u123\"">>)),
+    ?assertEqual(<<225,136,180>>, erlang:json_to_term(<<"\"\\u1234\"">>)),
+
+    ?assertEqual(<<" ">>, erlang:json_to_term(<<"\"\\u", $0, $0, $2, $0, "\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u", $0, $0, $g, $0, "\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u", $0, $0, 0, $0, "\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u", $0, $0, 127, $0, "\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u", $0, $0, 128, $0, "\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\u", $0, $0, 255, $0, "\"">>)),
+
+    %% UTF-16 surrogate pairs for code points >= U+10000.
+    ?assertEqual(<<240, 144, 128, 128>>, erlang:json_to_term(<<"\"\\uD800\\uDC00\"">>)), % U+10000.
+    ?assertEqual(<<243, 191, 191, 191>>, erlang:json_to_term(<<"\"\\uDBBF\\uDFFF\"">>)), % U+FFFFF.
+    ?assertEqual(<<244, 143, 191, 191>>, erlang:json_to_term(<<"\"\\uDBFF\\uDFFF\"">>)), % U+10FFFF.
+
+
+    ?assertEqual(<<237,159,191>>, erlang:json_to_term(<<"\"\\uD7FF\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\uD800\"">>)),
+    ?assertError(badarg, erlang:json_to_term(<<"\"\\uDFFF\"">>)),
+    ?assertEqual(<<238,128,128>>, erlang:json_to_term(<<"\"\\uE000\"">>)),
+    ok.
+
+j2t_unicode(Config) when is_list(Config) ->
     %% Two-byte UTF-8.
     ?assertEqual([ 16#80 ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#C2, 16#80, $">>))),
     ?assertEqual([ 16#7FF ], unicode:characters_to_list(erlang:json_to_term(<<$", 16#DF, 16#BF, $">>))),
@@ -531,9 +558,9 @@ j2t_unicode(Config) when is_list(Config) ->
     ?assertEqual(<<238,128,128>>, erlang:json_to_term(<<$", 16#EE, 16#80, 16#80, $">>)), % U+E000: OK, above range
 
     %% Bad UTF-8.
-    ?assertError(badarg, erlang:json_to_term(<<$", 16#80, $">>)),
-    ?assertError(badarg, erlang:json_to_term(<<$", 16#BF, $">>)),
-    ?assertError(badarg, erlang:json_to_term(<<$", 16#C0, $">>)),
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#80, $">>)), % bare continuation byte
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#BF, $">>)), % bare continuation byte
+    ?assertError(badarg, erlang:json_to_term(<<$", 16#C0, $">>)), % illegal byte
     ?assertError(badarg, erlang:json_to_term(<<34, 16#C1, 16#81, 34>>)), % long encoding for "A"
     ?assertError(badarg, erlang:json_to_term(<<$", 16#E0, 16#9F, 16#BF, $">>)), % long three-byte encoding
     ?assertError(badarg, erlang:json_to_term(<<$", 16#F0, 16#8F, 16#BF, 16#BF, $">>)), % long four-byte encoding

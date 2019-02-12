@@ -4,7 +4,33 @@
 
 This branch implements two new BIFs, =erlang:term_to_json= and
 =erlang:json_to_term=, for converting between Erlang terms and JSON-encoded
-binaries.
+binaries.  These BIFs are well-behaved: long running calls periodically yield
+to other processes.  The BIFs are fast: on my data, encoding is about five
+times faster and decoding is about three times faster than the other
+libraries; see the [[#benchmarks][benchmarks]] section below.
+
+The new BIFs have the specs:
+
+#+begin_src erlang
+-type json_binary() :: binary().
+
+-spec term_to_json(Term) -> json_binary() when
+      Term :: term().
+
+-spec term_to_json(Term, Options) -> json_binary() when
+      Term :: term(),
+      Options :: [Option],
+      Option :: use_nil |
+                {min_buf_size, pos_integer()}.
+-spec json_to_term(Json) -> term() when
+      Json :: json_binary().
+
+-spec json_to_term(Json, Options) -> term() when
+      Json :: json_binary(),
+      Options :: [Option],
+      Option :: return_maps |
+                use_nil.
+#+end_src
 
 * Term Representation
 
@@ -13,7 +39,7 @@ described in [[http://erlang.org/eeps/eep-0018.html][EEP-0018]].
 
 #+begin_src erlang
 -typedef jobject()      :: { list({jkey(), jvalue()} | jpreencoded()) } % proplist form
-                         | #{ jkey() => jvalue() }.                     % map form
+                         | #{ jkey() => jvalue(), json => binary() }.   % map form
 -typedef jarray()       :: list(jvalue()).
 -typedef jvalue()       :: jstring()
                          | jnumber()
@@ -21,7 +47,8 @@ described in [[http://erlang.org/eeps/eep-0018.html][EEP-0018]].
                          | 'false'
                          | jnull()
                          | jobject()
-                         | jarray().
+                         | jarray()
+                         | jpreencoded().
 -typedef jstring()      :: unicode:unicode_binary().
 -typedef jnumber()      :: integer()
                          | float().
@@ -36,16 +63,16 @@ described in [[http://erlang.org/eeps/eep-0018.html][EEP-0018]].
 
 For encoding JSON, =erlang:term_to_json= accepts a term in which objects are
 encoded in both the proplist and the map forms.  When decoding JSON, however,
-the form for decoded objects is either the proplist form (the default) or the
-map form (when the =return_maps= option is passed to =erlang:json_to_term/2=).
+you must choose one or the other: the proplist form (the default) or the map
+form (when the =return_maps= option is passed to =erlang:json_to_term/2=).
 
-=-erlang:term_to_json= accepts both binaries and atoms as object keys.  If
+=erlang:term_to_json= accepts both binaries and atoms as object keys.  If
 atoms are used they must be in UTF-8 (=erlang:term_to_json= does the
-equivalent of =atom_to_binary(Key, utf8)= on them).  =erlang:json_to_term=
+equivalent of ~atom_to_binary(Key, utf8)~ on them).  =erlang:json_to_term=
 always returns keys as binaries.
 
 =erlang:term_to_json= does not ensure that the keys in the JSON output are
-unique.  This can happen if the input contains object in the proplist form
+unique.  This can happen if the input contains objects in the proplist form
 that have duplicate keys, or in the map form if there are atom keys that when
 converted to binary clash with binary keys in the map.
 
@@ -59,12 +86,40 @@ map.  In my limited testing it appears that when the input contains duplicate
 keys this function keeps the last value associated with the key, but I don't
 know if this behavior is guaranteed.
 
+#+begin_example
+1> erlang:term_to_json({[ {<<"i">>, <<"one">>}, {<<"ii">>, 2}, {<<"iii">>, [ 1, 1, 1 ]} ]}).
+<<"{\"i\":\"one\",\"ii\":2,\"iii\":[1,1,1]}">>
+
+2> erlang:term_to_json(#{type => <<"cat">>, name => <<"fluffy">>, age => 7, says => <<"meow">>}).
+<<"{\"age\":7,\"name\":\"fluffy\",\"says\":\"meow\",\"type\":\"cat\"}">>
+
+3> erlang:json_to_term(<<"{\"title\":\"Ringworld\", \"author\":\"Larry Niven\", \"genre\":\"Science Fiction\"}">>).
+{[{<<"title">>,<<"Ringworld">>},
+  {<<"author">>,<<"Larry Niven">>},
+  {<<"genre">>,<<"Science Fiction">>}]}
+
+4> erlang:json_to_term(<<"{\"title\":\"The Hobbit\", \"author\":\"J.R.R. Tolkien\", \"genre\":\"Fantasy\"}">>, [ return_maps ]).
+#{<<"author">> => <<"J.R.R. Tolkien">>,
+  <<"genre">> => <<"Fantasy">>,
+  <<"title">> => <<"The Hobbit">>}
+#+end_example
+
 *** Differences From Other Implementations
 
-=erlang:json_to_term= does not support jiffy's =dedupe_keys= option.
+=erlang:json_to_term= does not support Jiffy's =dedupe_keys= option.
+
+=erlang:term_to_json= does not have the equivalent of Poison's =strict_keys=
+option to prevent duplicate keys in the JSON output.
+
+=erlang:term_to_json= does not have the provision to encode only a subset of
+an objects fields as Poison does through its =only= and =except= options.
 
 The keys in the objects that =erlang:json_to_term= returns are Erlang
 binaries, and there is no option to have atoms returned instead.
+
+** Arrays
+
+Erlang lists are converted to JSON arrays and vice versa.
 
 ** Strings
 
@@ -74,18 +129,46 @@ The BIFs convert between UTF-8-encoded Erlang binaries and JSON strings.
 It does not validate that Unicode characters are encoded in their shortest
 representation, for example.
 
+#+begin_example
+5> io:format("~ts\n", [ erlang:term_to_json(<<"π ≈ 3.1416\n"/utf8, 0, 1, 7, 8, 9, 10, 13>>) ]).
+"π ≈ 3.1416\n\u0000\u0001\u0007\b\t\n\r"
+ok
+#+end_example
+
 =erlang:json_to_term= is more careful, and invalid UTF-8 throws a badarg
 error.
 
+#+begin_example
+6> erlang:json_to_term(<<$", 0, $">>).
+** exception error: bad argument
+     in function  json_to_term/1
+        called as json_to_term(<<34,0,34>>)
+#+end_example
+
+=erlang:json_to_term= decodes escaped UTF-16 surrogate pairs to their UTF-8
+code point.  For example, the G-clef character 𝄞 = U+1D11E is escaped as
+"\uD834\uDD1E", but =erlang:json_to_term= will convert it back into its
+UTF-8-encoded form.  Unescaped UTF-16 surrogate pairs, however, are rejected.
+
+#+begin_example
+7> erlang:json_to_term(<<"[\"\\uD834\\uDD1E\",\"𝄞\"]"/utf8>>).
+[<<240,157,132,158>>,<<240,157,132,158>>]
+
+8> erlang:json_to_term(<<$", 16#D834:16, 16#DD1E:16, $">>).
+** exception error: bad argument
+     in function  json_to_term/1
+        called as json_to_term(<<34,216,52,221,30,34>>)
+#+end_example
+
 *** Differences From Other Implementations
 
-=erlang:json_to_term= does not support jiffy's =copy_strings= option.  It's
+=erlang:json_to_term= does not support Jiffy's =copy_strings= option.  It's
 not needed, as JSON strings are never returned as sub-binaries of the input.
 
-=erlang:term_to_json= does not support jiffy's =uescape= option to escape
-multi-byte UTF8 sequences to produce 7-bit output.
+=erlang:term_to_json= does not support Jiffy's =uescape= option to escape
+multi-byte UTF-8 sequences to produce 7-bit output.
 
-=erlang:term_to_json= does not support jiffy's =escape_forward_slashes= option.
+=erlang:term_to_json= does not support Jiffy's =escape_forward_slashes= option.
 
 ** Numbers
 
@@ -96,20 +179,20 @@ that Erlang numbers that are round-tripped through JSON will maintain their
 types.
 
 #+begin_example
-1> erlang:term_to_json([ 123, 456.0 ]).
+9> erlang:term_to_json([ 123, 456.0 ]).
 <<"[123,456.0]">>
 
-2> erlang:json_to_term(<<"[ 654, 321.0 ]">>).
+10> erlang:json_to_term(<<"[ 654, 321.0 ]">>).
 [654,321.0]
 #+end_example
 
 Erlang bignums are also supported.
 
 #+begin_example
-3> erlang:term_to_json(123456789012345678901234567890).
+11> erlang:term_to_json(123456789012345678901234567890).
 <<"123456789012345678901234567890">>
 
-4> erlang:json_to_term(<<"987654321098765432109876543210">>).
+12> erlang:json_to_term(<<"987654321098765432109876543210">>).
 987654321098765432109876543210
 #+end_example
 
@@ -129,47 +212,67 @@ atom =undefined=: it is not legal for input to =erlang:term_to_json= and it is
 not returned by =erlang:json_to_term=.
 
 #+begin_example
-5> erlang:term_to_json(null).
+13> erlang:term_to_json(null).
 <<"null">>
 
-6> erlang:term_to_json(nil).
+14> erlang:term_to_json(nil).
 ** exception error: bad argument
      in function  term_to_json/1
         called as term_to_json(nil)
 
-7> erlang:term_to_json(nil, [ use_nil ]).
+15> erlang:term_to_json(nil, [ use_nil ]).
 <<"null">>
 
-8> erlang:term_to_json(null, [ use_nil ]).
+16> erlang:term_to_json(null, [ use_nil ]).
 <<"null">>
 
-9> erlang:json_to_term(<<"null">>).
+17> erlang:json_to_term(<<"null">>).
 null
 
-10> erlang:json_to_term(<<"null">>, [ use_nil ]).
+18> erlang:json_to_term(<<"null">>, [ use_nil ]).
 null
 #+end_example
 
 *** Differences From Other Implementations
 
-Unlike jiffy, the BIFs do not support the ={null_term, Term}= option.
+Unlike Jiffy, the BIFs do not support the ={null_term, Term}= option.
 
 ** Preencoded JSON
 
 The =erlang:term_to_json= function supports preencoded JSON in its input.
 This can be useful if you are encoding many JSON documents that share common
-parts.
+parts.  The preencoded JSON is specified as ={json, binary()}= (or, in a map,
+as =json => binary()=).  Preencoded JSON can be used as a list or object
+value.
 
 #+begin_example
-11> PartialList = {json, (fun () -> B = erlang:term_to_json([ 1, 2, 3 ]), binary_part(B, 1, size(B) - 2) end)()}.
+19> erlang:term_to_json(#{o => {json, <<"{\"key\":\"value\"}">>}, a => {json, <<"[1,2,3]">>}}).
+<<"{\"a\":[1,2,3],\"o\":{\"key\":\"value\"}}">>
+#+end_example
+
+You can graft multiple values onto a list.
+
+#+begin_example
+20> PartialList = {json, (fun () -> B = erlang:term_to_json([ 1, 2, 3 ]), binary_part(B, 1, size(B) - 2) end)()}.
 {json,<<"1,2,3">>}
 
-12> erlang:term_to_json([ PartialList, 4, 5, 6 ]).
+21> erlang:term_to_json([ PartialList, 4, 5, 6 ]).
 <<"[1,2,3,4,5,6]">>
 #+end_example
 
-Beware that it is very easy to generate invalid output with preencoded JSON.
-For example, if you preencode a list that can be empty and then naively
+In addition, if an object proplist or map contains a entry with the
+key =json=, then the associated value will be grafted onto the object.
+
+#+begin_example
+22> erlang:term_to_json({[ {<<"a">>, <<"apple">>}, {<<"b">>, <<"ball">>}, {json, <<"\"c\":\"cake\",\"d\":\"dog\"">>} ]}).
+<<"{\"a\":\"apple\",\"b\":\"ball\",\"c\":\"cake\",\"d\":\"dog\"}">>
+
+23> erlang:term_to_json(#{<<"a">> => <<"apple">>, <<"b">> => <<"ball">>, json => <<"\"c\":\"cake\",\"d\":\"dog\"">>}).
+<<"{\"c\":\"cake\",\"d\":\"dog\",\"a\":\"apple\",\"b\":\"ball\"}">>
+#+end_example
+
+Beware that it is easy to generate invalid output with preencoded JSON.  For
+example, if you preencode a list that can be empty and then naively
 interpolate it into another list you can end up with something like
 =[,4,6,7]=.
 
@@ -179,43 +282,45 @@ The BIFs do not insist [[https://tools.ietf.org/html/rfc4627#section-2][as per r
 as the base value in a JSON text.
 
 =erlang:term_to_json= does not support pretty-printing of the JSON output, as
-jiffy does with its =pretty= option or EEP-0018 does with its ={space, N}= and
+Jiffy does with its =pretty= option or EEP-0018 does with its ={space, N}= and
 ={indent, N}= options.
 
 * Implementation Notes
 
-Both =erlang:term_to_json= and =erlang:json_to_term= are well-behaved, and
-yield regularly to allow other processes to run.
+Both =erlang:term_to_json= and =erlang:json_to_term= are well-behaved,
+yielding regularly to allow other processes, including in the middle of
+encoding and decoding long strings.
 
-=erlang:term_to_json= uses a buffer-doubling technique and converts its input
-to JSON in a single pass, then shrinks the output to its actual size at the
-end.  This is simpler and probably faster than the approach taken by
-=term_to_binary=, which makes an initial pass to determine the size of the
-output before allocating the buffer, but it does take more memory.  In
-particular when encoding a binary to a JSON string it ensures that six times
-the size of the binary is available (although it does the conversion in
-chunks, which limits how much extra memory is allocated).
+=erlang:term_to_json= uses a buffer-doubling technique for its output buffer
+and converts its input to JSON in a single pass, then shrinks the output to
+its actual size at the end.  This is simpler and probably faster than the
+approach taken by =term_to_binary=, which makes an initial pass to determine
+the size of the output before allocating the buffer, but it does take more
+memory.  In particular when encoding a binary to a JSON string it ensures that
+six times the size of the binary is available (although it does the conversion
+in chunks, which puts an upper limit on how much extra memory is allocated).
 
 =erlang:term_to_json= takes an =min_buf_size= option to set the initial buffer
 size; this is similar to =spawn_opt='s =min_heap_size= option.
 
 * Benchmarks
+  :PROPERTIES:
+  :CUSTOM_ID: benchmarks
+  :END:
 
-I have run the [[https://github.com/devinus/poison#current-benchmarks][poison benchmarks]].  The =erlang:term_to_json= BIF is, on
-average, about 5 times faster than the next fastest JSON library (usually
-jiffy).  The =erlang:json_to_term= BIF is, on average, about 2 to 3 times
-faster than the next fastest JSON library (also usually jiffy).  Jiffy is very
-close to =erlang:json_to_term= on a few benchmarks that test decoding strings,
-and Jiffy beats it on the "Issue 90" and "UTF-8 escaped" benchmarks; I believe
-this is because jiffy doesn't yield in the middle of decoding a long string.
+These results are from the [[https://github.com/devinus/poison#current-benchmarks][poison benchmarks]].  The =erlang:term_to_json= BIF
+is, on average, about 5 times faster than the next fastest JSON library
+(usually Jiffy).  The =erlang:json_to_term= BIF is, on average, about 2 to 3
+times faster than the next fastest JSON library (also usually Jiffy), although
+Jiffy does beat it on a few individual benchmarks.
 
 The [[https://github.com/iskra/jsonx][jsonx]] library is very fast but does not yield and is very memory intensive
 when encoding, and it caused my Erlang VM to be killed by the OOM killer for
-many of the benchmarks when I attempted to include it.  For the encoding
-benchmarks that I was able to run, =erlang:term_to_json= was 2x or more faster
-than =jsonx:encode=.  For decoding, =jsonx:decode= was overall as fast as
-=erlang:json_to_term=, and on some individual benchmarks was as much as 1.6x
-faster.
+many of the benchmarks when I attempted to include it in the results.  For the
+encoding benchmarks that I was able to run, =erlang:term_to_json= was 2x or
+more faster than =jsonx:encode=.  For decoding, =jsonx:decode= was overall as
+fast as =erlang:json_to_term=, and on some individual benchmarks was as much
+as 1.6x faster.
 
 The "BIFs" lines in the results below are this code.  I ran these benchmarks
 in a VirtualBox VM on my Late 2013 MacBook Pro.
@@ -513,6 +618,10 @@ JSX          21.45 K - 29.80x slower
 #+end_src
 
 ** Decoding
+
+Jiffy beats =erlang:json_to_term= on the pure-string decoding benchmarks
+"Issue 90", "UTF-8 escaped", and "UTF-8 unescaped" because it does not yield
+in the middle of decoding a long string.
 
 I suspect that the JSON benchmarks are so slow because the code has some
 logging that is turned off but is still causing the log output to be formated
@@ -835,8 +944,14 @@ JSX          35.80 K - 14.28x slower
 JSON          1.30 K - 393.70x slower
 #+end_src
 
+* Testing
+
+The BIFs have passed the tests in json_SUITE. A run under valgrind has not
+detected any errors or memory leaks.
+
+The BIFs have passed the tests in [[https://github.com/nst/JSONTestSuite][JSONTestSuite]].
+
 * License
 
 This code is Copyright 2019 OpenX Technologies and is released under the
-Apache 2.0 license.  If necessary, OpenX is willing to reassign the copyright
-to Ericsson.
+Apache 2.0 license.
