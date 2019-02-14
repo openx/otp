@@ -341,6 +341,7 @@ j2t_basic_types(Config) when is_list(Config) ->
     true = erlang:json_to_term(<<"true">>),
     false = erlang:json_to_term(<<"false">>),
     null = erlang:json_to_term(<<"null">>),
+    nil = erlang:json_to_term(<<"null">>, [ use_nil ]),
     1 = erlang:json_to_term(<<"1">>),
     1.1 = erlang:json_to_term(<<"1.1">>),
     <<"apple">> = erlang:json_to_term(<<"\"apple\"">>),

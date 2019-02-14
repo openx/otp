@@ -70,6 +70,7 @@ typedef struct T2JContext_struct {
 typedef struct J2TContext_struct {
     int alive;
     Uint32 flags;
+    Eterm null_atom;
     int state;
     const byte *ep;
     const byte *vp;
@@ -1061,6 +1062,7 @@ erts_json_to_term_int(Process *p, Eterm Json, Uint32 flags, Binary *context_b)
         is_first_call = 1;
         context_buf.alive = 1;
         context_buf.flags = flags;
+        context_buf.null_atom = (flags & JSON_USE_NIL) ? ERTS_MAKE_AM("nil") : am_null;
         context_buf.state = ST_INIT;
         context_buf.ep = bytes;
         context_buf.vp = NULL;
@@ -1595,7 +1597,7 @@ dec_json_int(Process *p, J2TContext *ctx, Sint *reds_arg, Eterm *result_term_arg
         case st_null0:
             if (likely(ep + 1 < endp && c == 'u' && ep[0] == 'l' && ep[1] == 'l')) {
                 ep += 2;
-                term = am_null;
+                term = ctx->null_atom;
                 state = st_end;
             } else {
                 goto fail;
